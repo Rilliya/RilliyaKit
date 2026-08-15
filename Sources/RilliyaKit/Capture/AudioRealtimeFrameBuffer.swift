@@ -222,8 +222,12 @@ public final class AudioRealtimeFrameBuffer: @unchecked Sendable {
     }
   }
 
+  /// Writes caller-owned planar Float32 PCM from the buffer's single producer.
+  ///
+  /// This method is realtime-safe after both the source pointers and this buffer have been
+  /// prepared. Calls for one instance must be serialized on exactly one producer thread.
   @discardableResult
-  func writePlanar(
+  public func writePlanar(
     _ inputChannels: UnsafeBufferPointer<UnsafePointer<Float>>,
     frameCount: Int
   ) -> Int {
@@ -233,8 +237,12 @@ public final class AudioRealtimeFrameBuffer: @unchecked Sendable {
     }
   }
 
+  /// Writes caller-owned interleaved Float32 PCM from the buffer's single producer.
+  ///
+  /// This method is realtime-safe after this buffer has been prepared. Calls for one instance
+  /// must be serialized on exactly one producer thread.
   @discardableResult
-  func writeInterleaved(
+  public func writeInterleaved(
     _ samples: UnsafePointer<Float>,
     channelCount: Int,
     frameCount: Int
