@@ -61,6 +61,35 @@ struct AudioRealtimeFrameBufferTests {
     #expect(statistics.availableFrameCount == 0)
   }
 
+  @Test("Consumer can restore a live latency bound without producer overwrite")
+  func consumerDiscardsOldestQueuedFrames() throws {
+    let buffer = try makeBuffer(channelCount: 1, capacity: 8)
+    let input: [Float] = [0, 1, 2, 3, 4, 5, 6, 7]
+    var output = [Float](repeating: -1, count: 4)
+
+    input.withUnsafeBufferPointer { samples in
+      let channels = [samples.baseAddress!]
+      channels.withUnsafeBufferPointer {
+        #expect(buffer.writePlanar($0, frameCount: input.count) == input.count)
+      }
+    }
+    #expect(buffer.discardOldestFrames(keepingLatest: 4) == 4)
+    let outputFrameCount = output.count
+    output.withUnsafeMutableBufferPointer { samples in
+      let channels = [samples.baseAddress!]
+      channels.withUnsafeBufferPointer {
+        #expect(
+          buffer.read(into: $0, frameCount: outputFrameCount)
+            == .read(frameCount: 4, silencedFrameCount: 0)
+        )
+      }
+    }
+
+    #expect(output == [4, 5, 6, 7])
+    #expect(buffer.statistics().discardedFrameCount == 4)
+    #expect(buffer.statistics().droppedFrameCount == 0)
+  }
+
   @Test("Deinterleaves native Float32 frames without allocation")
   func deinterleavesInput() throws {
     let buffer = try makeBuffer(channelCount: 2, capacity: 4)

@@ -47,6 +47,9 @@ public struct AudioRealtimeFrameBufferStatistics: Equatable, Sendable {
   /// New capture frames dropped because the bounded buffer was full.
   public let droppedFrameCount: UInt64
 
+  /// Old capture frames discarded by the consumer to restore its latency bound.
+  public let discardedFrameCount: UInt64
+
   /// Render frames replaced with silence because capture data was unavailable.
   public let silencedFrameCount: UInt64
 
@@ -85,6 +88,7 @@ public final class AudioRealtimeFrameBuffer: @unchecked Sendable {
   private let writtenFrameCount = ManagedAtomic<UInt64>(0)
   private let readFrameCount = ManagedAtomic<UInt64>(0)
   private let droppedFrameCount = ManagedAtomic<UInt64>(0)
+  private let discardedFrameCount = ManagedAtomic<UInt64>(0)
   private let silencedFrameCount = ManagedAtomic<UInt64>(0)
 
   /// Prepares fixed PCM storage away from the realtime thread.
@@ -173,9 +177,29 @@ public final class AudioRealtimeFrameBuffer: @unchecked Sendable {
       writtenFrameCount: writtenFrameCount.load(ordering: .relaxed),
       readFrameCount: readFrameCount.load(ordering: .relaxed),
       droppedFrameCount: droppedFrameCount.load(ordering: .relaxed),
+      discardedFrameCount: discardedFrameCount.load(ordering: .relaxed),
       silencedFrameCount: silencedFrameCount.load(ordering: .relaxed),
       availableFrameCount: min(frameDistance(from: read, to: write), capacityFrameCount)
     )
+  }
+
+  /// Discards the oldest queued frames while retaining a bounded live tail.
+  ///
+  /// Calls for one instance must be serialized with ``read(into:frameCount:)`` on the same single
+  /// consumer thread. The producer may continue writing concurrently. This operation copies no
+  /// samples and is safe for a realtime render thread.
+  @discardableResult
+  public func discardOldestFrames(keepingLatest retainedFrameCount: Int) -> Int {
+    let retainedFrameCount = min(max(retainedFrameCount, 0), capacityFrameCount)
+    let read = readPosition.load(ordering: .relaxed)
+    let write = writePosition.load(ordering: .acquiring)
+    let available = min(frameDistance(from: read, to: write), capacityFrameCount)
+    let discarded = max(available - retainedFrameCount, 0)
+    guard discarded > 0 else { return 0 }
+
+    readPosition.store(read &+ UInt64(discarded), ordering: .releasing)
+    add(discarded, to: discardedFrameCount)
+    return discarded
   }
 
   @discardableResult
