@@ -38,6 +38,18 @@ public struct AudioMeterCaptureConfiguration: Hashable, Sendable {
 /// The meter configuration accepted by process-output capture.
 public typealias ProcessOutputCaptureConfiguration = AudioMeterCaptureConfiguration
 
+/// How the tapped process reaches its ordinary hardware destination while capture is active.
+public enum ProcessOutputCaptureMuteBehavior: Hashable, Sendable {
+  /// Capture audio while leaving the process's ordinary hardware playback unchanged.
+  case unmuted
+
+  /// Prevent the process from reaching its ordinary hardware destination for the entire tap life.
+  case muted
+
+  /// Leave ordinary playback unchanged until another audio client actively reads the tap.
+  case mutedWhileTapped
+}
+
 /// The runtime format published by a process-output capture.
 public struct ProcessOutputCaptureFormat: Hashable, Sendable {
   /// The process whose output is captured.
@@ -233,7 +245,7 @@ public enum ProcessOutputCaptureError: Error, Hashable, LocalizedError, Sendable
   }
 }
 
-/// Captures one process's native output channels without muting their normal destination.
+/// Captures one process's native output channels with an explicit hardware-playback policy.
 ///
 /// A capture owns one private process tap and one private aggregate device. Snapshot callbacks run
 /// on a private serial delivery queue, never on the audio IO queue. Call ``stop()`` when capture is
@@ -245,6 +257,9 @@ public final class ProcessOutputCapture: @unchecked Sendable {
 
   /// The process selected when this capture was created.
   public let processID: AudioProcessID
+
+  /// The hardware-playback policy selected when the native tap was prepared.
+  public let muteBehavior: ProcessOutputCaptureMuteBehavior
 
   /// The native runtime format resolved while the tap was created.
   public let format: ProcessOutputCaptureFormat
@@ -273,16 +288,19 @@ public final class ProcessOutputCapture: @unchecked Sendable {
   /// - Parameters:
   ///   - processID: The public RilliyaKit identity of the process to capture.
   ///   - configuration: Bounds for meter delivery and waveform storage.
+  ///   - muteBehavior: Whether ordinary process playback continues while the tap is read.
   ///   - snapshotHandler: Called serially on a private non-IO queue.
   /// - Throws: ``ProcessOutputCaptureError`` when Core Audio cannot create or configure the tap.
   public convenience init(
     processID: AudioProcessID,
     configuration: ProcessOutputCaptureConfiguration = ProcessOutputCaptureConfiguration(),
+    muteBehavior: ProcessOutputCaptureMuteBehavior = .unmuted,
     snapshotHandler: @escaping SnapshotHandler
   ) throws {
     try self.init(
       processID: processID,
       configuration: configuration,
+      muteBehavior: muteBehavior,
       backend: CoreAudioProcessOutputCaptureBackend(),
       snapshotHandler: snapshotHandler
     )
@@ -291,15 +309,18 @@ public final class ProcessOutputCapture: @unchecked Sendable {
   init(
     processID: AudioProcessID,
     configuration: ProcessOutputCaptureConfiguration,
+    muteBehavior: ProcessOutputCaptureMuteBehavior = .unmuted,
     backend: any ProcessOutputCaptureBackend,
     snapshotHandler: @escaping SnapshotHandler
   ) throws {
     let resource = try backend.makeResource(
       processID: processID,
       configuration: configuration,
+      muteBehavior: muteBehavior,
       snapshotHandler: snapshotHandler
     )
     self.processID = processID
+    self.muteBehavior = muteBehavior
     format = resource.format
     frameBuffer = resource.frameBuffer
     self.resource = resource
@@ -355,6 +376,7 @@ protocol ProcessOutputCaptureBackend: Sendable {
   func makeResource(
     processID: AudioProcessID,
     configuration: ProcessOutputCaptureConfiguration,
+    muteBehavior: ProcessOutputCaptureMuteBehavior,
     snapshotHandler: @escaping ProcessOutputCapture.SnapshotHandler
   ) throws -> any ProcessOutputCaptureResource
 }

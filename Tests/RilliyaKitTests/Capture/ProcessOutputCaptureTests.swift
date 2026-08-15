@@ -16,11 +16,13 @@ struct ProcessOutputCaptureTests {
     let capture = try ProcessOutputCapture(
       processID: processID,
       configuration: ProcessOutputCaptureConfiguration(),
+      muteBehavior: .mutedWhileTapped,
       backend: StubProcessOutputCaptureBackend(resource: resource),
       snapshotHandler: { _ in }
     )
 
     #expect(capture.processID == processID)
+    #expect(capture.muteBehavior == .mutedWhileTapped)
     #expect(capture.format.sampleRate == 48_000)
     #expect(capture.format.channelIDs.count == 2)
     #expect(capture.frameBuffer.format.channelCount == 2)
@@ -101,6 +103,7 @@ private struct StubProcessOutputCaptureBackend: ProcessOutputCaptureBackend {
   func makeResource(
     processID: AudioProcessID,
     configuration: ProcessOutputCaptureConfiguration,
+    muteBehavior: ProcessOutputCaptureMuteBehavior,
     snapshotHandler: @escaping ProcessOutputCapture.SnapshotHandler
   ) throws -> any ProcessOutputCaptureResource {
     resource

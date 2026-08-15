@@ -9,11 +9,13 @@ struct CoreAudioProcessOutputCaptureBackend: ProcessOutputCaptureBackend {
   func makeResource(
     processID: AudioProcessID,
     configuration: ProcessOutputCaptureConfiguration,
+    muteBehavior: ProcessOutputCaptureMuteBehavior,
     snapshotHandler: @escaping ProcessOutputCapture.SnapshotHandler
   ) throws -> any ProcessOutputCaptureResource {
     try CoreAudioProcessOutputCaptureResource(
       processID: processID,
       configuration: configuration,
+      muteBehavior: muteBehavior,
       snapshotHandler: snapshotHandler
     )
   }
@@ -37,6 +39,7 @@ private final class CoreAudioProcessOutputCaptureResource:
   init(
     processID: AudioProcessID,
     configuration: ProcessOutputCaptureConfiguration,
+    muteBehavior: ProcessOutputCaptureMuteBehavior,
     snapshotHandler: @escaping ProcessOutputCapture.SnapshotHandler
   ) throws {
     var newTapID = AudioObjectID(kAudioObjectUnknown)
@@ -58,7 +61,7 @@ private final class CoreAudioProcessOutputCaptureResource:
       description.isPrivate = true
       description.isMixdown = false
       description.isMono = false
-      description.muteBehavior = .unmuted
+      description.muteBehavior = muteBehavior.nativeValue
 
       try CoreAudioProcessTapSupport.check(
         AudioHardwareCreateProcessTap(description, &newTapID),
@@ -246,6 +249,17 @@ private final class CoreAudioProcessOutputCaptureResource:
     }
     if let firstError {
       throw firstError
+    }
+  }
+}
+
+@available(macOS 14.2, *)
+extension ProcessOutputCaptureMuteBehavior {
+  fileprivate var nativeValue: CATapMuteBehavior {
+    switch self {
+    case .unmuted: .unmuted
+    case .muted: .muted
+    case .mutedWhileTapped: .mutedWhenTapped
     }
   }
 }
