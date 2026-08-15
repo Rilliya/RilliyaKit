@@ -38,8 +38,9 @@ RilliyaKit. A GUI can resolve those presentation details from each process ID or
 bundle identifier without introducing AppKit into the audio layer.
 
 Use `AudioCatalogDiscovery.updates()` when an application needs changed snapshots
-over time. The stream polls at a bounded interval, suppresses equal snapshots,
-and stops when its consumer cancels iteration.
+over time. The stream observes public Core Audio property notifications, coalesces
+bursts, suppresses equal snapshots, and stops when its consumer cancels iteration.
+A low-frequency fallback refresh protects against a missed HAL notification.
 
 On macOS 14.2 and later, `ProcessOutputCapture` can meter one running process's
 native output channels without muting normal playback:
@@ -80,6 +81,11 @@ if let deviceID = snapshot.inputDevices.first?.id {
 The host application is responsible for requesting microphone permission before
 constructing an input capture. RilliyaKit reports permission and native lifecycle
 failures as typed `DeviceInputCaptureError` values.
+
+`PreparedAudioSignalGeneratorSource` provides prepared sine, band-limited square,
+triangle, and sawtooth oscillators plus deterministic white, pink, and brown noise.
+It allocates its scratch storage before rendering and writes planar Float32 PCM
+without allocation, locking, logging, or callbacks on the realtime thread.
 
 ## Local development
 

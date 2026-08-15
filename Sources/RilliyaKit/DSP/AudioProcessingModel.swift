@@ -22,6 +22,12 @@ public enum AudioDSPConfigurationError: Error, Equatable, LocalizedError, Sendab
   /// A user-facing channel gain must remain within the safe realtime control range.
   case invalidChannelGain(Float)
 
+  /// A signal generator frequency must be finite, positive, and below Nyquist.
+  case invalidGeneratorFrequency(Double)
+
+  /// A signal generator amplitude must be finite and remain within full scale.
+  case invalidGeneratorAmplitude(Float)
+
   /// Latency, intentional delay, and finite tail lengths cannot be negative.
   case invalidTiming
 
@@ -43,6 +49,11 @@ public enum AudioDSPConfigurationError: Error, Equatable, LocalizedError, Sendab
       return "Audio gain values must be finite."
     case .invalidChannelGain(let gain):
       return "Channel gain must be between 0 and 16; received \(gain)."
+    case .invalidGeneratorFrequency(let frequency):
+      return
+        "Generator frequency must be finite, positive, and below Nyquist; received \(frequency)."
+    case .invalidGeneratorAmplitude(let amplitude):
+      return "Generator amplitude must be between 0 and 1; received \(amplitude)."
     case .invalidTiming:
       return "Audio timing frame counts cannot be negative."
     case .incompatibleMixerSampleRates:
