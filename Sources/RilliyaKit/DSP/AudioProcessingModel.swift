@@ -40,6 +40,24 @@ public enum AudioDSPConfigurationError: Error, Equatable, LocalizedError, Sendab
   /// A delay line would exceed the library's bounded storage budget.
   case delayStorageTooLarge(Int)
 
+  /// A noise-gate threshold must be a finite full-scale decibel value.
+  case invalidNoiseGateThreshold(Float)
+
+  /// Noise-gate hysteresis must be finite and remain within the supported range.
+  case invalidNoiseGateHysteresis(Float)
+
+  /// A noise-gate attack duration must be finite and bounded.
+  case invalidNoiseGateAttack(Double)
+
+  /// A noise-gate hold duration must be finite and bounded.
+  case invalidNoiseGateHold(Double)
+
+  /// A noise-gate release duration must be finite and bounded.
+  case invalidNoiseGateRelease(Double)
+
+  /// Closed-gate attenuation must be finite and bounded.
+  case invalidNoiseGateReduction(Float)
+
   /// Latency, intentional delay, and finite tail lengths cannot be negative.
   case invalidTiming
 
@@ -76,6 +94,18 @@ public enum AudioDSPConfigurationError: Error, Equatable, LocalizedError, Sendab
     case .delayStorageTooLarge(let sampleCount):
       return
         "The requested delay line needs \(sampleCount) samples and exceeds the bounded storage budget."
+    case .invalidNoiseGateThreshold(let threshold):
+      return "Noise-gate threshold must be between -96 and 0 dBFS; received \(threshold)."
+    case .invalidNoiseGateHysteresis(let hysteresis):
+      return "Noise-gate hysteresis must be between 0 and 24 dB; received \(hysteresis)."
+    case .invalidNoiseGateAttack(let attack):
+      return "Noise-gate attack must be between 0 and 1 second; received \(attack)."
+    case .invalidNoiseGateHold(let hold):
+      return "Noise-gate hold must be between 0 and 5 seconds; received \(hold)."
+    case .invalidNoiseGateRelease(let release):
+      return "Noise-gate release must be between 0 and 10 seconds; received \(release)."
+    case .invalidNoiseGateReduction(let reduction):
+      return "Noise-gate reduction must be between 0 and 96 dB; received \(reduction)."
     case .invalidTiming:
       return "Audio timing frame counts cannot be negative."
     case .incompatibleMixerSampleRates:
