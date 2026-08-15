@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import Foundation
 import Testing
 
 @testable import RilliyaKit
@@ -79,6 +80,17 @@ struct PreparedAudioSignalGeneratorSourceTests {
       source.render(outputChannels: $0, frameCount: 17)
     }
     #expect(result == .invalidFrameCount)
+  }
+
+  @Test("Decoding cannot bypass generator parameter validation")
+  func decodingPreservesConfigurationBounds() {
+    let invalid = Data(
+      #"{"waveform":"sine","frequency":440,"amplitude":2,"seed":1}"#.utf8
+    )
+
+    #expect(throws: DecodingError.self) {
+      try JSONDecoder().decode(AudioSignalGeneratorConfiguration.self, from: invalid)
+    }
   }
 
   private func makeSource(

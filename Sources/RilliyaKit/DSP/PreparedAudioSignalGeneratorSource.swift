@@ -66,6 +66,37 @@ public struct AudioSignalGeneratorConfiguration: Equatable, Hashable, Codable, S
     self.amplitude = amplitude
     self.seed = seed
   }
+
+  private enum CodingKeys: String, CodingKey {
+    case waveform
+    case frequency
+    case amplitude
+    case seed
+  }
+
+  /// Decodes generator parameters while preserving the same public safety bounds as direct
+  /// creation.
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    let waveform = try container.decode(AudioSignalGeneratorWaveform.self, forKey: .waveform)
+    let frequency = try container.decode(Double.self, forKey: .frequency)
+    let amplitude = try container.decode(Float.self, forKey: .amplitude)
+    let seed = try container.decode(UInt64.self, forKey: .seed)
+    do {
+      try self.init(
+        waveform: waveform,
+        frequency: frequency,
+        amplitude: amplitude,
+        seed: seed
+      )
+    } catch {
+      throw DecodingError.dataCorruptedError(
+        forKey: .frequency,
+        in: container,
+        debugDescription: "Generator parameters are outside the supported bounds."
+      )
+    }
+  }
 }
 
 /// A prepared, deterministic audio signal generator.
