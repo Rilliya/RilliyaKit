@@ -10,7 +10,9 @@ struct ProcessOutputCaptureTests {
   @Test("Publishes runtime format without exposing Core Audio object identifiers")
   func publishesRuntimeFormat() throws {
     let processID = try #require(AudioProcessID(rawValue: 42))
-    let resource = StubProcessOutputCaptureResource(format: captureFormat(processID: processID))
+    let resource = try StubProcessOutputCaptureResource(
+      format: captureFormat(processID: processID)
+    )
     let capture = try ProcessOutputCapture(
       processID: processID,
       configuration: ProcessOutputCaptureConfiguration(),
@@ -21,13 +23,16 @@ struct ProcessOutputCaptureTests {
     #expect(capture.processID == processID)
     #expect(capture.format.sampleRate == 48_000)
     #expect(capture.format.channelIDs.count == 2)
+    #expect(capture.frameBuffer.format.channelCount == 2)
     #expect(!capture.isRunning)
   }
 
   @Test("Start is idempotent while running and stop is terminal")
   func enforcesOneShotLifecycle() throws {
     let processID = try #require(AudioProcessID(rawValue: 42))
-    let resource = StubProcessOutputCaptureResource(format: captureFormat(processID: processID))
+    let resource = try StubProcessOutputCaptureResource(
+      format: captureFormat(processID: processID)
+    )
     let capture = try ProcessOutputCapture(
       processID: processID,
       configuration: ProcessOutputCaptureConfiguration(),
@@ -55,7 +60,7 @@ struct ProcessOutputCaptureTests {
       operation: .startDevice,
       status: AudioHardwareStatus(rawValue: -50)
     )
-    let resource = StubProcessOutputCaptureResource(
+    let resource = try StubProcessOutputCaptureResource(
       format: captureFormat(processID: processID),
       startError: failure
     )
@@ -106,6 +111,7 @@ private final class StubProcessOutputCaptureResource:
   ProcessOutputCaptureResource, @unchecked Sendable
 {
   let format: ProcessOutputCaptureFormat
+  let frameBuffer: AudioRealtimeFrameBuffer
 
   private let lock = NSLock()
   private let startError: ProcessOutputCaptureError?
@@ -115,8 +121,14 @@ private final class StubProcessOutputCaptureResource:
   init(
     format: ProcessOutputCaptureFormat,
     startError: ProcessOutputCaptureError? = nil
-  ) {
+  ) throws {
     self.format = format
+    frameBuffer = try AudioRealtimeFrameBuffer(
+      format: try AudioProcessingFormat(
+        sampleRate: format.sampleRate,
+        channelCount: format.channelIDs.count
+      )
+    )
     self.startError = startError
   }
 

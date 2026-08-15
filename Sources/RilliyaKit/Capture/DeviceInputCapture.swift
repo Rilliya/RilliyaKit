@@ -180,6 +180,12 @@ public final class DeviceInputCapture: @unchecked Sendable {
   /// The runtime client format resolved while the audio unit was created.
   public let format: DeviceInputCaptureFormat
 
+  /// Bounded native PCM frames produced by this capture.
+  ///
+  /// One serialized render consumer may read this buffer while device IO is running. The buffer
+  /// never allocates or invokes application code from the Core Audio render callback.
+  public let frameBuffer: AudioRealtimeFrameBuffer
+
   private enum State {
     case ready
     case running
@@ -231,6 +237,7 @@ public final class DeviceInputCapture: @unchecked Sendable {
     )
     self.deviceID = deviceID
     format = resource.format
+    frameBuffer = resource.frameBuffer
     self.resource = resource
   }
 
@@ -291,6 +298,7 @@ protocol DeviceInputCaptureBackend: Sendable {
 
 protocol DeviceInputCaptureResource: AnyObject, Sendable {
   var format: DeviceInputCaptureFormat { get }
+  var frameBuffer: AudioRealtimeFrameBuffer { get }
 
   func start() throws
 

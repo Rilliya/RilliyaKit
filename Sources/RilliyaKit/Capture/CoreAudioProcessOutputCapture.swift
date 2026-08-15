@@ -24,6 +24,7 @@ private final class CoreAudioProcessOutputCaptureResource:
   ProcessOutputCaptureResource, @unchecked Sendable
 {
   let format: ProcessOutputCaptureFormat
+  let frameBuffer: AudioRealtimeFrameBuffer
 
   private let lock = NSLock()
   private let ioQueue: DispatchQueue
@@ -108,7 +109,13 @@ private final class CoreAudioProcessOutputCaptureResource:
         sampleRate: streamFormat.mSampleRate,
         channelIDs: channelIDs
       )
+      let processingFormat = try AudioProcessingFormat(
+        sampleRate: format.sampleRate,
+        channelCount: format.channelIDs.count
+      )
+      let frameBuffer = try AudioRealtimeFrameBuffer(format: processingFormat)
       self.format = format
+      self.frameBuffer = frameBuffer
       tapID = newTapID
       aggregateID = newAggregateID
       ioQueue = DispatchQueue(
@@ -154,6 +161,7 @@ private final class CoreAudioProcessOutputCaptureResource:
     guard !isRunning else { return }
 
     let meterBridge = meterBridge
+    let frameBuffer = frameBuffer
     var newIOProcedureID: AudioDeviceIOProcID?
     try CoreAudioProcessTapSupport.check(
       AudioDeviceCreateIOProcIDWithBlock(
@@ -161,6 +169,7 @@ private final class CoreAudioProcessOutputCaptureResource:
         aggregateID,
         ioQueue
       ) { _, input, _, _, _ in
+        frameBuffer.write(input)
         meterBridge.consume(input)
       },
       operation: .createIOProcedure

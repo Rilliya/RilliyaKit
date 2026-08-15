@@ -13,7 +13,9 @@ struct DeviceInputCaptureTests {
   @Test("Publishes a stable device and channel format")
   func publishesStableRuntimeFormat() throws {
     let deviceID = try #require(StableAudioDeviceID(rawValue: "test-input-device"))
-    let resource = StubDeviceInputCaptureResource(format: captureFormat(deviceID: deviceID))
+    let resource = try StubDeviceInputCaptureResource(
+      format: captureFormat(deviceID: deviceID)
+    )
     let capture = try DeviceInputCapture(
       deviceID: deviceID,
       configuration: AudioMeterCaptureConfiguration(),
@@ -26,6 +28,7 @@ struct DeviceInputCaptureTests {
     #expect(capture.format.deviceID == deviceID)
     #expect(capture.format.sampleRate == 48_000)
     #expect(capture.format.channelIDs.count == 2)
+    #expect(capture.frameBuffer.format.channelCount == 2)
     for (index, channelID) in capture.format.channelIDs.enumerated() {
       #expect(channelID.ownerID == .source(.deviceInput(deviceID)))
       #expect(channelID.index.rawValue == index)
@@ -36,7 +39,9 @@ struct DeviceInputCaptureTests {
   @Test("Start is idempotent while running and stop is terminal")
   func enforcesOneShotLifecycle() throws {
     let deviceID = try #require(StableAudioDeviceID(rawValue: "test-input-device"))
-    let resource = StubDeviceInputCaptureResource(format: captureFormat(deviceID: deviceID))
+    let resource = try StubDeviceInputCaptureResource(
+      format: captureFormat(deviceID: deviceID)
+    )
     let capture = try DeviceInputCapture(
       deviceID: deviceID,
       configuration: AudioMeterCaptureConfiguration(),
@@ -65,7 +70,7 @@ struct DeviceInputCaptureTests {
       operation: .startAudioUnit,
       status: AudioHardwareStatus(rawValue: -50)
     )
-    let resource = StubDeviceInputCaptureResource(
+    let resource = try StubDeviceInputCaptureResource(
       format: captureFormat(deviceID: deviceID),
       startError: failure
     )
@@ -110,7 +115,7 @@ struct DeviceInputCaptureTests {
       operation: .disposeAudioUnit,
       status: AudioHardwareStatus(rawValue: -50)
     )
-    let resource = StubDeviceInputCaptureResource(
+    let resource = try StubDeviceInputCaptureResource(
       format: captureFormat(deviceID: deviceID),
       stopError: failure
     )
@@ -193,6 +198,7 @@ private final class StubDeviceInputCaptureResource:
   DeviceInputCaptureResource, @unchecked Sendable
 {
   let format: DeviceInputCaptureFormat
+  let frameBuffer: AudioRealtimeFrameBuffer
 
   private let lock = NSLock()
   private let startError: DeviceInputCaptureError?
@@ -204,8 +210,14 @@ private final class StubDeviceInputCaptureResource:
     format: DeviceInputCaptureFormat,
     startError: DeviceInputCaptureError? = nil,
     stopError: DeviceInputCaptureError? = nil
-  ) {
+  ) throws {
     self.format = format
+    frameBuffer = try AudioRealtimeFrameBuffer(
+      format: try AudioProcessingFormat(
+        sampleRate: format.sampleRate,
+        channelCount: format.channelIDs.count
+      )
+    )
     self.startError = startError
     self.stopError = stopError
   }

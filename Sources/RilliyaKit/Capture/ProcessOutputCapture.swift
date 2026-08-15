@@ -249,6 +249,12 @@ public final class ProcessOutputCapture: @unchecked Sendable {
   /// The native runtime format resolved while the tap was created.
   public let format: ProcessOutputCaptureFormat
 
+  /// Bounded native PCM frames produced by this capture.
+  ///
+  /// One serialized render consumer may read this buffer while capture IO is running. The buffer
+  /// never allocates or invokes application code from the Core Audio IO procedure.
+  public let frameBuffer: AudioRealtimeFrameBuffer
+
   private enum State {
     case ready
     case running
@@ -295,6 +301,7 @@ public final class ProcessOutputCapture: @unchecked Sendable {
     )
     self.processID = processID
     format = resource.format
+    frameBuffer = resource.frameBuffer
     self.resource = resource
   }
 
@@ -354,6 +361,7 @@ protocol ProcessOutputCaptureBackend: Sendable {
 
 protocol ProcessOutputCaptureResource: AnyObject, Sendable {
   var format: ProcessOutputCaptureFormat { get }
+  var frameBuffer: AudioRealtimeFrameBuffer { get }
 
   func start() throws
 
