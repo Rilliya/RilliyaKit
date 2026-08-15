@@ -9,7 +9,23 @@ let package = Package(
     .macOS("14.2")
   ],
   products: [
-    .library(name: "RilliyaKit", targets: ["RilliyaKit"])
+    .library(
+      name: "RilliyaKit",
+      targets: [
+        "RilliyaCore",
+        "RilliyaRealtime",
+        "RilliyaDiscovery",
+        "RilliyaCapture",
+        "RilliyaDSP",
+        "RilliyaPlayback",
+      ]
+    ),
+    .library(name: "RilliyaCore", targets: ["RilliyaCore"]),
+    .library(name: "RilliyaRealtime", targets: ["RilliyaRealtime"]),
+    .library(name: "RilliyaDiscovery", targets: ["RilliyaDiscovery"]),
+    .library(name: "RilliyaCapture", targets: ["RilliyaCapture"]),
+    .library(name: "RilliyaDSP", targets: ["RilliyaDSP"]),
+    .library(name: "RilliyaPlayback", targets: ["RilliyaPlayback"]),
   ],
   dependencies: [
     .package(
@@ -19,12 +35,39 @@ let package = Package(
   ],
   targets: [
     .target(
-      name: "RilliyaKit",
+      name: "RilliyaRealtime",
       dependencies: [
         .product(name: "Atomics", package: "swift-atomics")
       ]
     ),
-    .testTarget(name: "RilliyaKitTests", dependencies: ["RilliyaKit"]),
+    .target(name: "RilliyaCore"),
+    .target(name: "RilliyaDiscovery", dependencies: ["RilliyaCore"]),
+    .target(
+      name: "RilliyaCapture",
+      dependencies: ["RilliyaCore", "RilliyaRealtime"]
+    ),
+    .target(
+      name: "RilliyaDSP",
+      dependencies: [
+        "RilliyaRealtime",
+        .product(name: "Atomics", package: "swift-atomics"),
+      ]
+    ),
+    .target(
+      name: "RilliyaPlayback",
+      dependencies: ["RilliyaCore", "RilliyaRealtime"]
+    ),
+    .testTarget(
+      name: "RilliyaKitTests",
+      dependencies: [
+        "RilliyaCore",
+        "RilliyaRealtime",
+        "RilliyaDiscovery",
+        "RilliyaCapture",
+        "RilliyaDSP",
+        "RilliyaPlayback",
+      ]
+    ),
   ],
   swiftLanguageModes: [.v6]
 )

@@ -2,6 +2,18 @@
 
 import Foundation
 
+/// The result of one bounded realtime rendering or processing call.
+public enum AudioRenderResult: Equatable, Sendable {
+  /// Every requested frame and channel was rendered or processed.
+  case rendered
+
+  /// The requested frame count exceeded the prepared storage.
+  case invalidFrameCount
+
+  /// The caller supplied fewer channel pointers than the prepared format requires.
+  case insufficientChannels
+}
+
 /// A validation failure for a realtime audio-processing configuration.
 public enum AudioDSPConfigurationError: Error, Equatable, LocalizedError, Sendable {
   /// A sample rate must be finite and greater than zero.

@@ -2,7 +2,7 @@
 
 import Testing
 
-@testable import RilliyaKit
+@testable import RilliyaRealtime
 
 @Suite("Realtime audio frame buffer")
 struct AudioRealtimeFrameBufferTests {

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import Foundation
+import RilliyaCore
+import RilliyaRealtime
 
 /// The runtime format published by an input-device capture.
 public struct DeviceInputCaptureFormat: Hashable, Sendable {

@@ -2,11 +2,13 @@
 
 import AudioToolbox
 import Foundation
+import RilliyaCore
+import RilliyaRealtime
 import Testing
 
-@testable import RilliyaKit
+@testable import RilliyaPlayback
 
-private typealias StableAudioDeviceID = RilliyaKit.AudioDeviceID
+private typealias StableAudioDeviceID = RilliyaCore.AudioDeviceID
 
 @Suite("Device output playback lifecycle")
 struct DeviceOutputPlaybackTests {

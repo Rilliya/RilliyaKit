@@ -2,11 +2,13 @@
 
 import AudioToolbox
 import Foundation
+import RilliyaCore
+import RilliyaRealtime
 import Testing
 
-@testable import RilliyaKit
+@testable import RilliyaCapture
 
-private typealias StableAudioDeviceID = RilliyaKit.AudioDeviceID
+private typealias StableAudioDeviceID = RilliyaCore.AudioDeviceID
 
 @Suite("Device input capture lifecycle")
 struct DeviceInputCaptureTests {

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import Foundation
+import RilliyaRealtime
 
 /// The immutable bus layout used to prepare a realtime audio mixer.
 public struct AudioMixerRenderPreparation: Equatable, Hashable, Sendable {

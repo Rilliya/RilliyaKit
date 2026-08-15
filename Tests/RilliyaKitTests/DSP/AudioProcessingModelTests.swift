@@ -2,7 +2,7 @@
 
 import Testing
 
-@testable import RilliyaKit
+@testable import RilliyaRealtime
 
 @Suite("Audio processing model")
 struct AudioProcessingModelTests {

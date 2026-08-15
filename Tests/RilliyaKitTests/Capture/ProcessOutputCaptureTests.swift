@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import Foundation
+import RilliyaCore
+import RilliyaRealtime
 import Testing
 
-@testable import RilliyaKit
+@testable import RilliyaCapture
 
 @Suite("Process output capture lifecycle")
 struct ProcessOutputCaptureTests {

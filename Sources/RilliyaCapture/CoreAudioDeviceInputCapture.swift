@@ -5,12 +5,14 @@ import AudioUnit
 import CoreAudio
 import Dispatch
 import Foundation
+import RilliyaCore
+import RilliyaRealtime
 import os.lock
 
 @available(macOS 14.2, *)
 struct CoreAudioDeviceInputCaptureBackend: DeviceInputCaptureBackend {
   func makeResource(
-    deviceID: AudioDeviceID,
+    deviceID: RilliyaCore.AudioDeviceID,
     configuration: AudioMeterCaptureConfiguration,
     snapshotHandler: @escaping DeviceInputCapture.SnapshotHandler,
     failureHandler: @escaping DeviceInputCapture.FailureHandler
@@ -64,7 +66,7 @@ private final class CoreAudioDeviceInputCaptureResource:
   private var isRunning = false
 
   init(
-    deviceID: AudioDeviceID,
+    deviceID: RilliyaCore.AudioDeviceID,
     configuration: AudioMeterCaptureConfiguration,
     snapshotHandler: @escaping DeviceInputCapture.SnapshotHandler,
     failureHandler: @escaping DeviceInputCapture.FailureHandler
@@ -271,7 +273,9 @@ private final class CoreAudioDeviceInputCaptureResource:
     return noErr
   }
 
-  private static func deviceObjectID(for deviceID: AudioDeviceID) throws -> AudioObjectID {
+  private static func deviceObjectID(
+    for deviceID: RilliyaCore.AudioDeviceID
+  ) throws -> AudioObjectID {
     var address = AudioObjectPropertyAddress(
       mSelector: kAudioHardwarePropertyTranslateUIDToDevice,
       mScope: kAudioObjectPropertyScopeGlobal,

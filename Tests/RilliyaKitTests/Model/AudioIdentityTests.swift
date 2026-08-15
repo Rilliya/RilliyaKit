@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import RilliyaKit
+import RilliyaCore
 import Testing
 
 @Suite("Audio identities")

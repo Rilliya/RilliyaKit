@@ -3,6 +3,7 @@
 import CoreAudio
 import Darwin
 import Foundation
+import RilliyaCore
 
 struct CoreAudioCatalogProvider: AudioHardwareCatalogProvider {
   var currentProcessIdentifier: Int32 {

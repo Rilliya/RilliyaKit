@@ -3,6 +3,7 @@
 import CoreAudio
 import Dispatch
 import Foundation
+import RilliyaCore
 import os.lock
 
 @available(macOS 14.2, *)

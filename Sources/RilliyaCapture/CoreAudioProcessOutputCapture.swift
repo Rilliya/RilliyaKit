@@ -3,6 +3,8 @@
 import CoreAudio
 import Dispatch
 import Foundation
+import RilliyaCore
+import RilliyaRealtime
 
 @available(macOS 14.2, *)
 struct CoreAudioProcessOutputCaptureBackend: ProcessOutputCaptureBackend {

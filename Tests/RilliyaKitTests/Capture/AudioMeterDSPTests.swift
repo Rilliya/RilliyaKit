@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import RilliyaCore
 import Testing
 
-@testable import RilliyaKit
+@testable import RilliyaCapture
 
 @Suite("Audio meter DSP")
 struct AudioMeterDSPTests {

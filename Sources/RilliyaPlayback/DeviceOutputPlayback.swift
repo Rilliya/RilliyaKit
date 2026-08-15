@@ -4,12 +4,14 @@ import AudioToolbox
 import CoreAudio
 import Dispatch
 import Foundation
+import RilliyaCore
+import RilliyaRealtime
 import os.lock
 
 /// The runtime format prepared for one physical or virtual Core Audio output device.
 public struct DeviceOutputPlaybackFormat: Hashable, Sendable {
   /// The persistent identity of the destination device.
-  public let deviceID: AudioDeviceID
+  public let deviceID: RilliyaCore.AudioDeviceID
 
   /// The number of sample frames rendered each second.
   public let sampleRate: Double
@@ -22,7 +24,7 @@ public struct DeviceOutputPlaybackFormat: Hashable, Sendable {
 
   /// Creates a prepared output-device format.
   public init(
-    deviceID: AudioDeviceID,
+    deviceID: RilliyaCore.AudioDeviceID,
     sampleRate: Double,
     channelIDs: [AudioChannelID],
     maximumFrameCount: Int
@@ -88,16 +90,16 @@ public enum DeviceOutputPlaybackOperation: String, Hashable, Sendable {
 /// A typed failure from output-device setup, rendering, or lifecycle management.
 public enum DeviceOutputPlaybackError: Error, Equatable, LocalizedError, Sendable {
   /// Core Audio does not currently publish a device with the requested UID.
-  case deviceNotFound(AudioDeviceID)
+  case deviceNotFound(RilliyaCore.AudioDeviceID)
 
   /// The requested device is present but unavailable for IO.
-  case deviceUnavailable(AudioDeviceID)
+  case deviceUnavailable(RilliyaCore.AudioDeviceID)
 
   /// The requested device publishes no output channels.
-  case noOutputChannels(AudioDeviceID)
+  case noOutputChannels(RilliyaCore.AudioDeviceID)
 
   /// The device format cannot be represented by this bounded playback path.
-  case unsupportedFormat(AudioDeviceID)
+  case unsupportedFormat(RilliyaCore.AudioDeviceID)
 
   /// The prepared renderer does not match the device format or maximum quantum.
   case incompatibleRenderer
@@ -155,7 +157,7 @@ public final class DeviceOutputPlayback: @unchecked Sendable {
   public typealias FailureHandler = @Sendable (DeviceOutputPlaybackError) -> Void
 
   /// The persistent destination identity selected during setup.
-  public let deviceID: AudioDeviceID
+  public let deviceID: RilliyaCore.AudioDeviceID
 
   /// The runtime client format prepared for the selected device.
   public let format: DeviceOutputPlaybackFormat
@@ -172,7 +174,7 @@ public final class DeviceOutputPlayback: @unchecked Sendable {
 
   /// Creates native output-device playback using the public AUHAL interface.
   public convenience init(
-    deviceID: AudioDeviceID,
+    deviceID: RilliyaCore.AudioDeviceID,
     rendererFactory: @escaping RendererFactory,
     failureHandler: @escaping FailureHandler = { _ in }
   ) throws {
@@ -185,7 +187,7 @@ public final class DeviceOutputPlayback: @unchecked Sendable {
   }
 
   init(
-    deviceID: AudioDeviceID,
+    deviceID: RilliyaCore.AudioDeviceID,
     backend: any DeviceOutputPlaybackBackend,
     rendererFactory: @escaping RendererFactory,
     failureHandler: @escaping FailureHandler
@@ -244,7 +246,7 @@ public final class DeviceOutputPlayback: @unchecked Sendable {
 
 protocol DeviceOutputPlaybackBackend: Sendable {
   func makeResource(
-    deviceID: AudioDeviceID,
+    deviceID: RilliyaCore.AudioDeviceID,
     rendererFactory: @escaping DeviceOutputPlayback.RendererFactory,
     failureHandler: @escaping DeviceOutputPlayback.FailureHandler
   ) throws -> any DeviceOutputPlaybackResource
@@ -261,7 +263,7 @@ protocol DeviceOutputPlaybackResource: AnyObject, Sendable {
 @available(macOS 14.2, *)
 private struct CoreAudioDeviceOutputPlaybackBackend: DeviceOutputPlaybackBackend {
   func makeResource(
-    deviceID: AudioDeviceID,
+    deviceID: RilliyaCore.AudioDeviceID,
     rendererFactory: @escaping DeviceOutputPlayback.RendererFactory,
     failureHandler: @escaping DeviceOutputPlayback.FailureHandler
   ) throws -> any DeviceOutputPlaybackResource {
@@ -288,7 +290,7 @@ private final class CoreAudioDeviceOutputPlaybackResource:
   private var isRunning = false
 
   init(
-    deviceID: AudioDeviceID,
+    deviceID: RilliyaCore.AudioDeviceID,
     rendererFactory: @escaping DeviceOutputPlayback.RendererFactory,
     failureHandler: @escaping DeviceOutputPlayback.FailureHandler
   ) throws {
@@ -510,7 +512,9 @@ private final class CoreAudioDeviceOutputPlaybackResource:
     }
   }
 
-  private static func deviceObjectID(for deviceID: AudioDeviceID) throws -> AudioObjectID {
+  private static func deviceObjectID(
+    for deviceID: RilliyaCore.AudioDeviceID
+  ) throws -> AudioObjectID {
     var address = AudioObjectPropertyAddress(
       mSelector: kAudioHardwarePropertyTranslateUIDToDevice,
       mScope: kAudioObjectPropertyScopeGlobal,

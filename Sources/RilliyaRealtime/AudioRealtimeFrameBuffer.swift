@@ -203,7 +203,7 @@ public final class AudioRealtimeFrameBuffer: @unchecked Sendable {
   }
 
   @discardableResult
-  func write(_ list: UnsafePointer<AudioBufferList>) -> Int {
+  package func write(_ list: UnsafePointer<AudioBufferList>) -> Int {
     let buffers = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: list))
     var availableChannelCount = 0
     var sourceFrameCount = Int.max

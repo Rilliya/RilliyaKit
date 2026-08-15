@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import Foundation
+import RilliyaCore
+import RilliyaRealtime
 
 /// Configuration for bounded audio meter snapshots.
 public struct AudioMeterCaptureConfiguration: Hashable, Sendable {

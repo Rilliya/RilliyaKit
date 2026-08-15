@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import RilliyaCore
+
 /// Discovers the current Core Audio process and device catalog.
 public struct AudioCatalogDiscovery: Sendable {
   private let builder: AudioCatalogBuilder

@@ -2,6 +2,7 @@
 
 import Atomics
 import Foundation
+import RilliyaRealtime
 
 /// Immutable parameters for a linked multichannel noise gate.
 ///

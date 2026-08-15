@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import RilliyaCore
+
 typealias HardwareObjectID = UInt32
 
 protocol AudioHardwareCatalogProvider: Sendable {

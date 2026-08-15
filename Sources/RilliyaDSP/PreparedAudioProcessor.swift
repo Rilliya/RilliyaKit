@@ -2,18 +2,7 @@
 
 import Atomics
 import Foundation
-
-/// The result of one bounded realtime processing call.
-public enum AudioRenderResult: Equatable, Sendable {
-  /// Every requested frame and channel was processed.
-  case rendered
-
-  /// The requested frame count exceeded the processor's prepared storage.
-  case invalidFrameCount
-
-  /// The caller supplied fewer channel pointers than the prepared format requires.
-  case insufficientChannels
-}
+import RilliyaRealtime
 
 /// A prepared processor that can run without allocating, locking, or invoking user callbacks.
 ///

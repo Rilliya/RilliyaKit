@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import CoreFoundation
+import RilliyaCore
 import Testing
 
-@testable import RilliyaKit
+@testable import RilliyaDiscovery
 
 @Suite("CoreAudioPropertyDataValidator")
 struct CoreAudioPropertyDataValidatorTests {

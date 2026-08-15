@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import Foundation
+import RilliyaRealtime
 import Testing
 
-@testable import RilliyaKit
+@testable import RilliyaDSP
 
 @Suite("Prepared signal generator")
 struct PreparedAudioSignalGeneratorSourceTests {

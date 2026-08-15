@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import Foundation
+import RilliyaCore
 import Testing
 
-@testable import RilliyaKit
+@testable import RilliyaDiscovery
 
 @Suite("AudioCatalogDiscovery")
 struct AudioCatalogDiscoveryTests {

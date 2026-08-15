@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import RilliyaRealtime
 import Testing
 
-@testable import RilliyaKit
+@testable import RilliyaDSP
 
 @Suite("Realtime audio DSP")
 struct RealtimeAudioDSPTests {

@@ -2,6 +2,7 @@
 
 import Accelerate
 import Foundation
+import RilliyaRealtime
 
 /// A waveform produced by a prepared signal generator.
 public enum AudioSignalGeneratorWaveform: String, CaseIterable, Codable, Sendable {

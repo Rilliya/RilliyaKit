@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import Foundation
+import RilliyaRealtime
 
 /// Immutable parameters for a bounded realtime delay line.
 public struct AudioDelayConfiguration: Equatable, Hashable, Codable, Sendable {
