@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import Foundation
 import Testing
 
 @testable import RilliyaKit
@@ -184,6 +185,117 @@ struct AudioCatalogDiscoveryTests {
     let snapshot = try await iterator.next()
 
     #expect(snapshot?.inputDevices.map(\.id.rawValue) == ["input"])
+  }
+
+  @Test("Publishes event-driven changes and suppresses equal snapshots")
+  func publishesEventDrivenChanges() async throws {
+    let provider = MutableAudioHardwareProvider(deviceName: "Initial")
+    let changeSource = ManualAudioCatalogChangeSource()
+    let updates = AudioCatalogDiscovery(
+      provider: provider,
+      changeSource: changeSource
+    ).updates()
+    var iterator = updates.makeAsyncIterator()
+
+    let initial = try await iterator.next()
+    provider.setDeviceName("Updated")
+    changeSource.send()
+    let updated = try await iterator.next()
+    changeSource.send()
+    changeSource.finish()
+    let duplicate = try await iterator.next()
+
+    #expect(initial?.devices.first?.name == "Initial")
+    #expect(updated?.devices.first?.name == "Updated")
+    #expect(duplicate == nil)
+  }
+}
+
+private final class ManualAudioCatalogChangeSource: AudioCatalogChangeSource, @unchecked Sendable {
+  private let lock = NSLock()
+  private var continuation: AsyncStream<Void>.Continuation?
+
+  func changes() -> AsyncStream<Void> {
+    AsyncStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
+      lock.withLock {
+        self.continuation = continuation
+      }
+      continuation.onTermination = { [weak self] _ in
+        self?.lock.withLock {
+          self?.continuation = nil
+        }
+      }
+    }
+  }
+
+  func send() {
+    lock.withLock { continuation }?.yield(())
+  }
+
+  func finish() {
+    let continuation = lock.withLock { () -> AsyncStream<Void>.Continuation? in
+      defer { self.continuation = nil }
+      return self.continuation
+    }
+    continuation?.finish()
+  }
+}
+
+private final class MutableAudioHardwareProvider: AudioHardwareCatalogProvider, @unchecked Sendable
+{
+  let currentProcessIdentifier: Int32 = 999
+
+  private let lock = NSLock()
+  private var deviceName: String
+
+  init(deviceName: String) {
+    self.deviceName = deviceName
+  }
+
+  func setDeviceName(_ name: String) {
+    lock.withLock {
+      deviceName = name
+    }
+  }
+
+  func deviceObjectIDs() throws(AudioCatalogError) -> [HardwareObjectID] {
+    [10]
+  }
+
+  func processObjectIDs() throws(AudioCatalogError) -> [HardwareObjectID] {
+    []
+  }
+
+  func defaultDeviceObjectID(
+    for direction: AudioDirection
+  ) throws(AudioCatalogError) -> HardwareObjectID? {
+    direction == .input ? 10 : nil
+  }
+
+  func device(
+    for objectID: HardwareObjectID
+  ) throws(AudioCatalogError) -> HardwareDeviceDescription {
+    guard objectID == 10 else {
+      throw missingDataError(objectKind: .device, property: .deviceIdentifier)
+    }
+    return lock.withLock {
+      HardwareDeviceDescription(
+        uid: "mutable-input",
+        name: deviceName,
+        transportType: 0,
+        nominalSampleRate: 48_000,
+        isAlive: true,
+        isRunning: false,
+        input: endpoint(channelCount: 1),
+        output: nil
+      )
+    }
+  }
+
+  func process(
+    for objectID: HardwareObjectID
+  ) throws(AudioCatalogError) -> HardwareProcessDescription {
+    throw missingDataError(objectKind: .process, property: .processIdentifier)
   }
 }
 
