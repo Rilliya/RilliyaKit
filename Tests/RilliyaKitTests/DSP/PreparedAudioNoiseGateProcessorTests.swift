@@ -76,6 +76,30 @@ struct PreparedAudioNoiseGateProcessorTests {
   }
 
   @Test
+  func configurationUpdatesApplyWithoutResettingDetectorState() throws {
+    let processor = try makeProcessor(
+      thresholdDecibels: -20,
+      holdSeconds: 0.5,
+      reductionDecibels: 40
+    )
+    _ = process(processor, inputs: [[0.2, 0.04, 0.04, 0.04]])
+
+    try processor.setConfiguration(
+      AudioNoiseGateConfiguration(
+        thresholdDecibels: -10,
+        hysteresisDecibels: 6,
+        attackSeconds: 0,
+        holdSeconds: 0.5,
+        releaseSeconds: 0,
+        reductionDecibels: 20
+      )
+    )
+    let rendered = process(processor, inputs: [[0.04, 0.04, 0.04, 0.04]])
+
+    expectChannels(rendered.channels, equalTo: [[0.04, 0.004, 0.004, 0.004]])
+  }
+
+  @Test
   func validationAndDecodingRejectUnsafeParameters() throws {
     #expect(throws: AudioDSPConfigurationError.invalidNoiseGateThreshold(1)) {
       try AudioNoiseGateConfiguration(thresholdDecibels: 1)
