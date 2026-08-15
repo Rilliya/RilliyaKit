@@ -137,6 +137,26 @@ let source = try PreparedAudioSignalGeneratorSource(
 )
 ```
 
+## Custom realtime sources and processors
+
+RilliyaKit intentionally leaves its prepared render contracts open. A client module
+can implement `PreparedAudioSource` to produce audio, or `PreparedAudioProcessor` to
+transform one noninterleaved Float32 bus, then connect that source to
+`DeviceOutputPlayback`. No Rilliya app type or internal API is required.
+
+These protocols are a trusted, compile-time extension surface. Implementations run
+inside the host process and can be called directly by a Core Audio realtime thread.
+They must obey the documented frame and pointer bounds and must not allocate, block,
+log, call application code, or perform Objective-C messaging during render. A Swift
+protocol cannot enforce those realtime rules or isolate unsafe pointer access, so
+these APIs must not be used to load untrusted binary plug-ins.
+
+Rilliya does not load arbitrary bundles or use `dlopen`. A future host for untrusted
+third-party effects should use Apple's Audio Unit extension model and request
+out-of-process instantiation. The Rilliya GUI's node registry is not currently a
+public plug-in SDK; the open render contracts are the supported developer extension
+point for this release.
+
 ## Local development
 
 The repository provides stable entry points for all required local checks:
