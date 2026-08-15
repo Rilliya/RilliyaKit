@@ -62,6 +62,25 @@ Capture callbacks are delivered on a private non-audio queue. Each snapshot is
 bounded by `ProcessOutputCaptureConfiguration`; the real-time IO callback uses
 preallocated storage and never invokes application code directly.
 
+`DeviceInputCapture` provides the same bounded meter surface for a physical or
+virtual Core Audio input device. It accepts the persistent `AudioDeviceID` exposed
+by catalog discovery and uses AUHAL to obtain planar Float32 channels:
+
+```swift
+if let deviceID = snapshot.inputDevices.first?.id {
+  let capture = try DeviceInputCapture(deviceID: deviceID) { snapshot in
+    print(snapshot.channels.map(\.peak))
+  }
+
+  try capture.start()
+  try capture.stop()
+}
+```
+
+The host application is responsible for requesting microphone permission before
+constructing an input capture. RilliyaKit reports permission and native lifecycle
+failures as typed `DeviceInputCaptureError` values.
+
 ## Local development
 
 The repository provides stable entry points for all required local checks:

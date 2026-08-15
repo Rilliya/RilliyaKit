@@ -101,7 +101,7 @@ struct AudioMeterDSPTests {
 
   @Test("Clamps public visualizer bounds")
   func clampsConfiguration() {
-    let configuration = ProcessOutputCaptureConfiguration(
+    let configuration = AudioMeterCaptureConfiguration(
       updatesPerSecond: 500,
       waveformSampleCount: 10_000,
       minimumDecibels: -500
@@ -110,11 +110,14 @@ struct AudioMeterDSPTests {
     #expect(configuration.updatesPerSecond == 60)
     #expect(
       configuration.waveformSampleCount
-        == ProcessOutputCaptureConfiguration.maximumWaveformSampleCount
+        == AudioMeterCaptureConfiguration.maximumWaveformSampleCount
     )
     #expect(configuration.minimumDecibels == -200)
 
-    let nonfiniteConfiguration = ProcessOutputCaptureConfiguration(minimumDecibels: .nan)
+    let nonfiniteConfiguration = AudioMeterCaptureConfiguration(minimumDecibels: .nan)
     #expect(nonfiniteConfiguration.minimumDecibels == -120)
+
+    let processCompatibilityConfiguration = ProcessOutputCaptureConfiguration()
+    #expect(processCompatibilityConfiguration == AudioMeterCaptureConfiguration())
   }
 }

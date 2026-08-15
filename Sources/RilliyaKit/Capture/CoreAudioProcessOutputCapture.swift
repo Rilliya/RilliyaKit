@@ -116,9 +116,19 @@ private final class CoreAudioProcessOutputCaptureResource:
         qos: .userInteractive
       )
       meterBridge = RealtimeMeterBridge(
-        format: format,
+        sampleRate: format.sampleRate,
+        channelIDs: format.channelIDs,
         configuration: configuration,
-        snapshotHandler: snapshotHandler
+        snapshotHandler: { sequence, frameCount, channels in
+          snapshotHandler(
+            ProcessOutputMeterSnapshot(
+              format: format,
+              sequence: sequence,
+              frameCount: frameCount,
+              channels: channels
+            )
+          )
+        }
       )
     } catch {
       if newAggregateID != kAudioObjectUnknown {

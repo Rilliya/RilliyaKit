@@ -7,9 +7,17 @@ import os.lock
 
 @available(macOS 14.2, *)
 final class RealtimeMeterBridge: @unchecked Sendable {
-  private let format: ProcessOutputCaptureFormat
-  private let configuration: ProcessOutputCaptureConfiguration
-  private let snapshotHandler: ProcessOutputCapture.SnapshotHandler
+  typealias SnapshotHandler =
+    @Sendable (
+      _ sequence: UInt64,
+      _ frameCount: Int,
+      _ channels: [AudioChannelMeterSnapshot]
+    ) -> Void
+
+  private let sampleRate: Double
+  private let channelIDs: [AudioChannelID]
+  private let configuration: AudioMeterCaptureConfiguration
+  private let snapshotHandler: SnapshotHandler
   private let deliverySource: DispatchSourceUserDataAdd
   private let rootMeanSquares: UnsafeMutablePointer<Float>
   private let peaks: UnsafeMutablePointer<Float>
@@ -25,14 +33,16 @@ final class RealtimeMeterBridge: @unchecked Sendable {
   private var isPublishing = true
 
   init(
-    format: ProcessOutputCaptureFormat,
-    configuration: ProcessOutputCaptureConfiguration,
-    snapshotHandler: @escaping ProcessOutputCapture.SnapshotHandler
+    sampleRate: Double,
+    channelIDs: [AudioChannelID],
+    configuration: AudioMeterCaptureConfiguration,
+    snapshotHandler: @escaping SnapshotHandler
   ) {
-    self.format = format
+    self.sampleRate = sampleRate
+    self.channelIDs = channelIDs
     self.configuration = configuration
     self.snapshotHandler = snapshotHandler
-    let channelCount = format.channelIDs.count
+    let channelCount = channelIDs.count
     let waveformCapacity = channelCount * configuration.waveformSampleCount
     rootMeanSquares = .allocate(capacity: channelCount)
     peaks = .allocate(capacity: channelCount)
@@ -48,7 +58,7 @@ final class RealtimeMeterBridge: @unchecked Sendable {
     waveforms.initialize(repeating: 0, count: waveformCapacity)
 
     let deliveryQueue = DispatchQueue(
-      label: "moe.uwucocoa.rilliyakit.process-meter.delivery",
+      label: "moe.uwucocoa.rilliyakit.meter.delivery",
       qos: .userInitiated
     )
     deliverySource = DispatchSource.makeUserDataAddSource(queue: deliveryQueue)
@@ -61,7 +71,7 @@ final class RealtimeMeterBridge: @unchecked Sendable {
   deinit {
     deliverySource.setEventHandler {}
     deliverySource.cancel()
-    let channelCount = format.channelIDs.count
+    let channelCount = channelIDs.count
     rootMeanSquares.deinitialize(count: channelCount)
     peaks.deinitialize(count: channelCount)
     decibels.deinitialize(count: channelCount)
@@ -88,7 +98,7 @@ final class RealtimeMeterBridge: @unchecked Sendable {
 
     framesUntilUpdate -= frameCount
     guard framesUntilUpdate <= 0 else { return }
-    framesUntilUpdate = max(1, Int(format.sampleRate / Double(configuration.updatesPerSecond)))
+    framesUntilUpdate = max(1, Int(sampleRate / Double(configuration.updatesPerSecond)))
     guard os_unfair_lock_trylock(&storageLock) else { return }
     defer { os_unfair_lock_unlock(&storageLock) }
     guard isPublishing else { return }
@@ -100,7 +110,7 @@ final class RealtimeMeterBridge: @unchecked Sendable {
       let localFrameCount = sampleCount / localChannelCount
       let samples = buffer.mData?.assumingMemoryBound(to: Float32.self)
 
-      for localChannel in 0..<localChannelCount where channelIndex < format.channelIDs.count {
+      for localChannel in 0..<localChannelCount where channelIndex < channelIDs.count {
         let waveform = waveforms.advanced(
           by: channelIndex * configuration.waveformSampleCount
         )
@@ -121,7 +131,7 @@ final class RealtimeMeterBridge: @unchecked Sendable {
       }
     }
 
-    while channelIndex < format.channelIDs.count {
+    while channelIndex < channelIDs.count {
       let waveform = waveforms.advanced(
         by: channelIndex * configuration.waveformSampleCount
       )
@@ -154,8 +164,8 @@ final class RealtimeMeterBridge: @unchecked Sendable {
     let capturedSequence = sequence
     let capturedFrameCount = latestFrameCount
     var channelSnapshots: [AudioChannelMeterSnapshot] = []
-    channelSnapshots.reserveCapacity(format.channelIDs.count)
-    for (index, channelID) in format.channelIDs.enumerated() {
+    channelSnapshots.reserveCapacity(channelIDs.count)
+    for (index, channelID) in channelIDs.enumerated() {
       let waveformStart = waveforms.advanced(by: index * configuration.waveformSampleCount)
       let waveform = Array(
         UnsafeBufferPointer(start: waveformStart, count: waveformCounts[index])
@@ -174,13 +184,6 @@ final class RealtimeMeterBridge: @unchecked Sendable {
     publishedSequence = capturedSequence
     os_unfair_lock_unlock(&storageLock)
 
-    snapshotHandler(
-      ProcessOutputMeterSnapshot(
-        format: format,
-        sequence: capturedSequence,
-        frameCount: capturedFrameCount,
-        channels: channelSnapshots
-      )
-    )
+    snapshotHandler(capturedSequence, capturedFrameCount, channelSnapshots)
   }
 }

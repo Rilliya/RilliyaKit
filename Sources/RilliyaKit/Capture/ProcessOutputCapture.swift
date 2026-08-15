@@ -2,8 +2,8 @@
 
 import Foundation
 
-/// Configuration for bounded process-output meter snapshots.
-public struct ProcessOutputCaptureConfiguration: Hashable, Sendable {
+/// Configuration for bounded audio meter snapshots.
+public struct AudioMeterCaptureConfiguration: Hashable, Sendable {
   /// The largest waveform array accepted by the capture implementation.
   public static let maximumWaveformSampleCount = 512
 
@@ -16,7 +16,7 @@ public struct ProcessOutputCaptureConfiguration: Hashable, Sendable {
   /// The decibel value reported for silence and values below the display floor.
   public let minimumDecibels: Float
 
-  /// Creates a bounded capture configuration.
+  /// Creates a bounded meter capture configuration.
   ///
   /// Values are clamped to safe visualizer ranges: 1...60 updates per second, 1...512 waveform
   /// samples, and -200...-1 dB for the display floor.
@@ -34,6 +34,9 @@ public struct ProcessOutputCaptureConfiguration: Hashable, Sendable {
     self.minimumDecibels = min(max(finiteMinimumDecibels, -200), -1)
   }
 }
+
+/// The meter configuration accepted by process-output capture.
+public typealias ProcessOutputCaptureConfiguration = AudioMeterCaptureConfiguration
 
 /// The runtime format published by a process-output capture.
 public struct ProcessOutputCaptureFormat: Hashable, Sendable {
@@ -58,7 +61,7 @@ public struct ProcessOutputCaptureFormat: Hashable, Sendable {
   }
 }
 
-/// A bounded meter and waveform value for one process-output channel.
+/// A bounded meter and waveform value for one audio channel.
 public struct AudioChannelMeterSnapshot: Equatable, Sendable {
   /// The channel represented by this snapshot.
   public let channelID: AudioChannelID
