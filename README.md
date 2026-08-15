@@ -41,6 +41,27 @@ Use `AudioCatalogDiscovery.updates()` when an application needs changed snapshot
 over time. The stream polls at a bounded interval, suppresses equal snapshots,
 and stops when its consumer cancels iteration.
 
+On macOS 14.2 and later, `ProcessOutputCapture` can meter one running process's
+native output channels without muting normal playback:
+
+```swift
+if let processID = snapshot.processes.first(where: \.isRunningOutput)?.id {
+  let capture = try ProcessOutputCapture(processID: processID) { snapshot in
+    for channel in snapshot.channels {
+      print(channel.channelID, channel.decibels)
+    }
+  }
+
+  try capture.start()
+  // Retain the capture while it is in use, then release its Core Audio resources.
+  try capture.stop()
+}
+```
+
+Capture callbacks are delivered on a private non-audio queue. Each snapshot is
+bounded by `ProcessOutputCaptureConfiguration`; the real-time IO callback uses
+preallocated storage and never invokes application code directly.
+
 ## Local development
 
 The repository provides stable entry points for all required local checks:
