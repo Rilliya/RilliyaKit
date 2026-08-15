@@ -25,6 +25,9 @@ public enum AudioDSPConfigurationError: Error, Equatable, LocalizedError, Sendab
   /// Latency, intentional delay, and finite tail lengths cannot be negative.
   case invalidTiming
 
+  /// Every mixer input and output must use one clock rate before realtime rendering begins.
+  case incompatibleMixerSampleRates
+
   /// A localized description of the invalid configuration.
   public var errorDescription: String? {
     switch self {
@@ -42,6 +45,8 @@ public enum AudioDSPConfigurationError: Error, Equatable, LocalizedError, Sendab
       return "Channel gain must be between 0 and 16; received \(gain)."
     case .invalidTiming:
       return "Audio timing frame counts cannot be negative."
+    case .incompatibleMixerSampleRates:
+      return "Mixer inputs and outputs must use the same prepared sample rate."
     }
   }
 }

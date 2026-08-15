@@ -141,7 +141,7 @@ public final class AudioChannelGainControlBank: @unchecked Sendable {
     )
   }
 
-  fileprivate func effectiveGain(at channel: Int) -> Float {
+  func effectiveGain(at channel: Int) -> Float {
     slots[channel].value.load(ordering: .relaxed).control.effectiveGain
   }
 
