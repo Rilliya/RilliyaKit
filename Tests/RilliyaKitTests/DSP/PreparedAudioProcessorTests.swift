@@ -22,9 +22,47 @@ struct PreparedAudioProcessorTests {
     #expect(throws: AudioChannelControlError.channelOutOfRange(2)) {
       try controls.setMuted(true, at: 2)
     }
-    #expect(throws: AudioDSPConfigurationError.invalidChannelGain(-1)) {
-      try AudioChannelGainControl(linearGain: -1)
+    #expect(try AudioChannelGainControl(linearGain: -1).linearGain == -1)
+    #expect(throws: AudioDSPConfigurationError.invalidChannelGain(-17)) {
+      try AudioChannelGainControl(linearGain: -17)
     }
+  }
+
+  @Test("Prepared gain applies polarity inversion without a second render pass")
+  func preparedGainInvertsPolarity() throws {
+    let format = try AudioProcessingFormat(sampleRate: 48_000, channelCount: 1)
+    let preparation = try AudioRenderPreparation(format: format, maximumFrameCount: 3)
+    let controls = try AudioChannelGainControlBank(channelCount: 1)
+    try controls.setLinearGain(-0.5, at: 0)
+    let processor = try PreparedAudioChannelGainProcessor(
+      preparation: preparation,
+      controls: controls,
+      rampDurationSeconds: 0
+    )
+    let input: [Float] = [1, -0.5, 0.25]
+    var output = [Float](repeating: 0, count: input.count)
+
+    let result = input.withUnsafeBufferPointer { inputBuffer in
+      output.withUnsafeMutableBufferPointer { outputBuffer in
+        guard let inputAddress = inputBuffer.baseAddress,
+          let outputAddress = outputBuffer.baseAddress
+        else { return AudioRenderResult.insufficientChannels }
+        let inputs = [inputAddress]
+        let outputs = [outputAddress]
+        return inputs.withUnsafeBufferPointer { inputChannels in
+          outputs.withUnsafeBufferPointer { outputChannels in
+            processor.process(
+              inputChannels: inputChannels,
+              outputChannels: outputChannels,
+              frameCount: input.count
+            )
+          }
+        }
+      }
+    }
+
+    #expect(result == .rendered)
+    #expect(output == [-0.5, 0.25, -0.125])
   }
 
   @Test("Prepared gain applies independent channel controls without temporary allocation")

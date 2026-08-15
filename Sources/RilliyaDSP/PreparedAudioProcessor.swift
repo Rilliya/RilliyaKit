@@ -32,7 +32,9 @@ public struct AudioChannelGainControl: Equatable, Sendable {
   /// The largest accepted linear gain, equivalent to approximately +24.1 dB.
   public static let maximumLinearGain: Float = 16
 
-  /// Linear amplitude applied to this channel before mute state.
+  /// Signed linear amplitude applied to this channel before mute state.
+  ///
+  /// Negative values invert polarity without requiring a separate render pass.
   public let linearGain: Float
 
   /// Whether the channel should ramp to silence.
@@ -43,7 +45,7 @@ public struct AudioChannelGainControl: Equatable, Sendable {
     guard linearGain.isFinite else {
       throw AudioDSPConfigurationError.nonfiniteGain
     }
-    guard (0...Self.maximumLinearGain).contains(linearGain) else {
+    guard abs(linearGain) <= Self.maximumLinearGain else {
       throw AudioDSPConfigurationError.invalidChannelGain(linearGain)
     }
     self.linearGain = linearGain

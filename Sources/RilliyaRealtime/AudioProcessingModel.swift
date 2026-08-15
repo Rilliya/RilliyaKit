@@ -90,7 +90,7 @@ public enum AudioDSPConfigurationError: Error, Equatable, LocalizedError, Sendab
     case .nonfiniteGain:
       return "Audio gain values must be finite."
     case .invalidChannelGain(let gain):
-      return "Channel gain must be between 0 and 16; received \(gain)."
+      return "Channel gain must be between -16 and 16; received \(gain)."
     case .invalidGeneratorFrequency(let frequency):
       return
         "Generator frequency must be finite, positive, and below Nyquist; received \(frequency)."
