@@ -20,11 +20,26 @@ Then add `RilliyaKit` to the target dependencies and import the module:
 ```swift
 import RilliyaKit
 
-let firstChannel = AudioChannelIndex(rawValue: 0)
+let discovery = AudioCatalogDiscovery()
+let snapshot = try discovery.snapshot()
+
+for process in snapshot.processes where process.isRunningOutput {
+  print(process.bundleIdentifier ?? "PID \(process.id.rawValue)")
+}
 ```
 
-`AudioChannelIndex` uses the zero-based indexing expected by audio buffers and
-rejects negative values at initialization.
+`AudioCatalogSnapshot` contains value types for audio processes, devices,
+directional endpoints, native streams, and channels. Persistent device UIDs and
+runtime process IDs are wrapped in distinct identity types; internal Core Audio
+object IDs are not exposed.
+
+Application names, icons, and activation policies are intentionally absent from
+RilliyaKit. A GUI can resolve those presentation details from each process ID or
+bundle identifier without introducing AppKit into the audio layer.
+
+Use `AudioCatalogDiscovery.updates()` when an application needs changed snapshots
+over time. The stream polls at a bounded interval, suppresses equal snapshots,
+and stops when its consumer cancels iteration.
 
 ## Local development
 
