@@ -70,11 +70,32 @@ public enum AudioDSPConfigurationError: Error, Equatable, LocalizedError, Sendab
   /// Closed-gate attenuation must be finite and bounded.
   case invalidNoiseGateReduction(Float)
 
+  /// A compressor threshold must be a finite full-scale decibel value.
+  case invalidCompressorThreshold(Float)
+
+  /// A compressor ratio must be finite and no smaller than unity.
+  case invalidCompressorRatio(Float)
+
+  /// A compressor soft-knee width must be finite and bounded.
+  case invalidCompressorKnee(Float)
+
+  /// A compressor attack duration must be finite and bounded.
+  case invalidCompressorAttack(Double)
+
+  /// A compressor release duration must be finite and bounded.
+  case invalidCompressorRelease(Double)
+
+  /// Compressor makeup gain must be finite and bounded.
+  case invalidCompressorMakeupGain(Float)
+
   /// Latency, intentional delay, and finite tail lengths cannot be negative.
   case invalidTiming
 
   /// Every mixer input and output must use one clock rate before realtime rendering begins.
   case incompatibleMixerSampleRates
+
+  /// A mixer topology exceeds the bounded preparation or realtime-work budget.
+  case excessiveMixerResources
 
   /// A localized description of the invalid configuration.
   public var errorDescription: String? {
@@ -118,10 +139,24 @@ public enum AudioDSPConfigurationError: Error, Equatable, LocalizedError, Sendab
       return "Noise-gate release must be between 0 and 10 seconds; received \(release)."
     case .invalidNoiseGateReduction(let reduction):
       return "Noise-gate reduction must be between 0 and 96 dB; received \(reduction)."
+    case .invalidCompressorThreshold(let threshold):
+      return "Compressor threshold must be between -96 and 0 dBFS; received \(threshold)."
+    case .invalidCompressorRatio(let ratio):
+      return "Compressor ratio must be between 1:1 and 100:1; received \(ratio):1."
+    case .invalidCompressorKnee(let knee):
+      return "Compressor knee width must be between 0 and 24 dB; received \(knee)."
+    case .invalidCompressorAttack(let attack):
+      return "Compressor attack must be between 0 and 1 second; received \(attack)."
+    case .invalidCompressorRelease(let release):
+      return "Compressor release must be between 0 and 10 seconds; received \(release)."
+    case .invalidCompressorMakeupGain(let gain):
+      return "Compressor makeup gain must be between -24 and 24 dB; received \(gain)."
     case .invalidTiming:
       return "Audio timing frame counts cannot be negative."
     case .incompatibleMixerSampleRates:
       return "Mixer inputs and outputs must use the same prepared sample rate."
+    case .excessiveMixerResources:
+      return "The mixer topology exceeds the supported bus, channel, route, or storage budget."
     }
   }
 }

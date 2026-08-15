@@ -5,6 +5,12 @@ import RilliyaRealtime
 
 /// The immutable bus layout used to prepare a realtime audio mixer.
 public struct AudioMixerRenderPreparation: Equatable, Hashable, Sendable {
+  /// The maximum number of independently addressed input buses.
+  public static let maximumInputBusCount = 64
+
+  /// The maximum number of channel pointers flattened across all input buses.
+  public static let maximumFlattenedInputChannelCount = 1_024
+
   /// Input buses in stable graph order.
   public let inputFormats: [AudioProcessingFormat]
 
@@ -21,12 +27,25 @@ public struct AudioMixerRenderPreparation: Equatable, Hashable, Sendable {
     inputFormats: [AudioProcessingFormat],
     output: AudioRenderPreparation
   ) throws {
+    guard inputFormats.count <= Self.maximumInputBusCount else {
+      throw AudioDSPConfigurationError.excessiveMixerResources
+    }
     guard inputFormats.allSatisfy({ $0.sampleRate == output.format.sampleRate }) else {
       throw AudioDSPConfigurationError.incompatibleMixerSampleRates
     }
+    var flattenedInputChannelCount = 0
+    for format in inputFormats {
+      let result = flattenedInputChannelCount.addingReportingOverflow(format.channelCount)
+      guard !result.overflow,
+        result.partialValue <= Self.maximumFlattenedInputChannelCount
+      else {
+        throw AudioDSPConfigurationError.excessiveMixerResources
+      }
+      flattenedInputChannelCount = result.partialValue
+    }
     self.inputFormats = inputFormats
     self.output = output
-    flattenedInputChannelCount = inputFormats.reduce(0) { $0 + $1.channelCount }
+    self.flattenedInputChannelCount = flattenedInputChannelCount
   }
 }
 
@@ -38,6 +57,9 @@ public struct AudioMixerRenderPreparation: Equatable, Hashable, Sendable {
 /// Calls for one instance must remain serialized on one render thread; control updates are safe
 /// from other threads.
 public final class PreparedAudioMixerProcessor: @unchecked Sendable {
+  /// The maximum number of matrix contributions evaluated in one render quantum.
+  public static let maximumRouteCount = 4_096
+
   private struct CompiledRoute: Sendable {
     let flattenedSourceChannel: Int
     let destinationChannel: Int
@@ -66,6 +88,9 @@ public final class PreparedAudioMixerProcessor: @unchecked Sendable {
     outputControls: AudioChannelGainControlBank? = nil,
     rampDurationSeconds: Double = 0.005
   ) throws {
+    guard routes.count <= Self.maximumRouteCount else {
+      throw AudioDSPConfigurationError.excessiveMixerResources
+    }
     guard rampDurationSeconds.isFinite, rampDurationSeconds >= 0 else {
       throw AudioDSPConfigurationError.invalidTiming
     }
@@ -105,9 +130,13 @@ public final class PreparedAudioMixerProcessor: @unchecked Sendable {
     self.outputControls = controls
     self.compiledRoutes = compiledRoutes
     rampDurationFrames = max(0, Int(requestedRampFrames.rounded()))
-    let outputSampleCapacity =
-      preparation.output.format.channelCount
-      * preparation.output.maximumFrameCount
+    let outputCapacityResult = preparation.output.format.channelCount.multipliedReportingOverflow(
+      by: preparation.output.maximumFrameCount
+    )
+    guard !outputCapacityResult.overflow else {
+      throw AudioDSPConfigurationError.excessiveMixerResources
+    }
+    let outputSampleCapacity = outputCapacityResult.partialValue
     mixStorage = .allocate(capacity: outputSampleCapacity)
     mixStorage.initialize(repeating: 0, count: outputSampleCapacity)
     envelope = .allocate(capacity: preparation.output.maximumFrameCount)

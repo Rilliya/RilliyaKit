@@ -17,8 +17,10 @@ public protocol PreparedAudioProcessor: AnyObject, Sendable {
 
   /// Processes noninterleaved Float32 PCM into caller-owned output storage.
   ///
-  /// Input and output may alias for in-place processing. The pointer collections and their sample
-  /// storage must remain valid for the duration of this call.
+  /// One output channel may exactly equal its corresponding input channel for in-place processing.
+  /// Partial overlap, cross-channel aliasing, and overlap between channels are unsupported. The
+  /// pointer collections and every sample allocation must remain valid for the duration of this
+  /// call.
   @discardableResult
   func process(
     inputChannels: UnsafeBufferPointer<UnsafePointer<Float>>,
@@ -116,20 +118,25 @@ public final class AudioChannelGainControlBank: @unchecked Sendable {
 
   /// Atomically changes one channel's linear gain without altering mute state.
   public func setLinearGain(_ linearGain: Float, at channel: Int) throws {
-    let current = try control(at: channel)
-    try setControl(
-      AudioChannelGainControl(linearGain: linearGain, isMuted: current.isMuted),
-      at: channel
-    )
+    let validated = try AudioChannelGainControl(linearGain: linearGain)
+    let slot = try slot(at: channel)
+    update(slot) { current in
+      AudioChannelGainControl(
+        validatedLinearGain: validated.linearGain,
+        isMuted: current.isMuted
+      )
+    }
   }
 
   /// Atomically changes one channel's mute state without altering its stored gain.
   public func setMuted(_ isMuted: Bool, at channel: Int) throws {
-    let current = try control(at: channel)
-    try setControl(
-      AudioChannelGainControl(linearGain: current.linearGain, isMuted: isMuted),
-      at: channel
-    )
+    let slot = try slot(at: channel)
+    update(slot) { current in
+      AudioChannelGainControl(
+        validatedLinearGain: current.linearGain,
+        isMuted: isMuted
+      )
+    }
   }
 
   func effectiveGain(at channel: Int) -> Float {
@@ -141,6 +148,23 @@ public final class AudioChannelGainControlBank: @unchecked Sendable {
       throw AudioChannelControlError.channelOutOfRange(channel)
     }
     return slots[channel]
+  }
+
+  private func update(
+    _ slot: Slot,
+    transform: (AudioChannelGainControl) -> AudioChannelGainControl
+  ) {
+    var current = slot.value.load(ordering: .relaxed)
+    while true {
+      let desired = Self.pack(transform(current.control))
+      let result = slot.value.compareExchange(
+        expected: current,
+        desired: desired,
+        ordering: .relaxed
+      )
+      guard !result.exchanged else { return }
+      current = result.original
+    }
   }
 
   private static func pack(_ control: AudioChannelGainControl) -> UInt64 {

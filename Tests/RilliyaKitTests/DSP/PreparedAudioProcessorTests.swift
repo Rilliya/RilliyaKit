@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import Dispatch
 import RilliyaRealtime
 import Testing
 
@@ -25,6 +26,26 @@ struct PreparedAudioProcessorTests {
     #expect(try AudioChannelGainControl(linearGain: -1).linearGain == -1)
     #expect(throws: AudioDSPConfigurationError.invalidChannelGain(-17)) {
       try AudioChannelGainControl(linearGain: -17)
+    }
+  }
+
+  @Test("Concurrent partial control updates preserve both fields")
+  func concurrentControlUpdatesPreserveBothFields() throws {
+    let controls = try AudioChannelGainControlBank(channelCount: 1)
+
+    for _ in 0..<2_000 {
+      try controls.setControl(AudioChannelGainControl(), at: 0)
+      DispatchQueue.concurrentPerform(iterations: 2) { operation in
+        if operation == 0 {
+          try? controls.setLinearGain(0.25, at: 0)
+        } else {
+          try? controls.setMuted(true, at: 0)
+        }
+      }
+      #expect(
+        try controls.control(at: 0)
+          == AudioChannelGainControl(linearGain: 0.25, isMuted: true)
+      )
     }
   }
 

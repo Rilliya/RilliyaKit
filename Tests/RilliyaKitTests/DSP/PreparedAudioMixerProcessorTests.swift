@@ -7,6 +7,48 @@ import Testing
 
 @Suite("Prepared audio mixer")
 struct PreparedAudioMixerProcessorTests {
+  @Test("Mixer preparation rejects excessive bus and flattened-channel counts")
+  func mixerPreparationHasBoundedTopology() throws {
+    let mono = try AudioProcessingFormat(sampleRate: 48_000, channelCount: 1)
+    let wide = try AudioProcessingFormat(sampleRate: 48_000, channelCount: 256)
+    let output = try AudioRenderPreparation(format: mono, maximumFrameCount: 64)
+
+    #expect(throws: AudioDSPConfigurationError.excessiveMixerResources) {
+      try AudioMixerRenderPreparation(
+        inputFormats: Array(
+          repeating: mono,
+          count: AudioMixerRenderPreparation.maximumInputBusCount + 1
+        ),
+        output: output
+      )
+    }
+    #expect(throws: AudioDSPConfigurationError.excessiveMixerResources) {
+      try AudioMixerRenderPreparation(
+        inputFormats: Array(repeating: wide, count: 5),
+        output: output
+      )
+    }
+  }
+
+  @Test("Prepared mixer rejects excessive realtime route work")
+  func mixerHasBoundedRouteCount() throws {
+    let mono = try AudioProcessingFormat(sampleRate: 48_000, channelCount: 1)
+    let output = try AudioRenderPreparation(format: mono, maximumFrameCount: 64)
+    let preparation = try AudioMixerRenderPreparation(inputFormats: [mono], output: output)
+    let route = try AudioChannelRoute(
+      inputIndex: 0,
+      sourceChannel: 0,
+      destinationChannel: 0
+    )
+
+    #expect(throws: AudioDSPConfigurationError.excessiveMixerResources) {
+      try PreparedAudioMixerProcessor(
+        preparation: preparation,
+        routes: Array(repeating: route, count: PreparedAudioMixerProcessor.maximumRouteCount + 1)
+      )
+    }
+  }
+
   @Test("Matrix routes remap and sum inputs without clipping")
   func routesRemapAndSum() throws {
     let mono = try AudioProcessingFormat(sampleRate: 48_000, channelCount: 1)
