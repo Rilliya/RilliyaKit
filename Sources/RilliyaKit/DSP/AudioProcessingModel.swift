@@ -19,6 +19,9 @@ public enum AudioDSPConfigurationError: Error, Equatable, LocalizedError, Sendab
   /// A gain value must be finite.
   case nonfiniteGain
 
+  /// A user-facing channel gain must remain within the safe realtime control range.
+  case invalidChannelGain(Float)
+
   /// Latency, intentional delay, and finite tail lengths cannot be negative.
   case invalidTiming
 
@@ -35,6 +38,8 @@ public enum AudioDSPConfigurationError: Error, Equatable, LocalizedError, Sendab
       return "Audio channel routes cannot contain negative input or channel indices."
     case .nonfiniteGain:
       return "Audio gain values must be finite."
+    case .invalidChannelGain(let gain):
+      return "Channel gain must be between 0 and 16; received \(gain)."
     case .invalidTiming:
       return "Audio timing frame counts cannot be negative."
     }

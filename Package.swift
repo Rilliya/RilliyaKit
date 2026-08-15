@@ -11,8 +11,19 @@ let package = Package(
   products: [
     .library(name: "RilliyaKit", targets: ["RilliyaKit"])
   ],
+  dependencies: [
+    .package(
+      url: "https://github.com/apple/swift-atomics.git",
+      .upToNextMajor(from: "1.3.1")
+    )
+  ],
   targets: [
-    .target(name: "RilliyaKit"),
+    .target(
+      name: "RilliyaKit",
+      dependencies: [
+        .product(name: "Atomics", package: "swift-atomics")
+      ]
+    ),
     .testTarget(name: "RilliyaKitTests", dependencies: ["RilliyaKit"]),
   ],
   swiftLanguageModes: [.v6]
