@@ -212,8 +212,8 @@ public final class PreparedAudioChannelGainProcessor: PreparedAudioProcessor,
     rampDurationFrames = max(0, Int(requestedRampFrames.rounded()))
     envelope = .allocate(capacity: preparation.maximumFrameCount)
     envelope.initialize(repeating: 1, count: preparation.maximumFrameCount)
-    rampStates = (0..<preparation.format.channelCount).map { _ in
-      AudioGainRampState(gain: 1)
+    rampStates = (0..<preparation.format.channelCount).map { channel in
+      AudioGainRampState(gain: controls.effectiveGain(at: channel))
     }
   }
 

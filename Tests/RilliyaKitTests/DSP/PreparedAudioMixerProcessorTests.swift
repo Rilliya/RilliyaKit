@@ -76,6 +76,42 @@ struct PreparedAudioMixerProcessorTests {
     #expect(right == [0, 0])
   }
 
+  @Test("Prepared mixer begins at controls published before preparation")
+  func startsAtPublishedOutputControls() throws {
+    let mono = try AudioProcessingFormat(sampleRate: 1_000, channelCount: 1)
+    let output = try AudioRenderPreparation(format: mono, maximumFrameCount: 2)
+    let preparation = try AudioMixerRenderPreparation(inputFormats: [mono], output: output)
+    let controls = try AudioChannelGainControlBank(channelCount: 1)
+    try controls.setMuted(true, at: 0)
+    let processor = try PreparedAudioMixerProcessor(
+      preparation: preparation,
+      routes: [
+        try AudioChannelRoute(inputIndex: 0, sourceChannel: 0, destinationChannel: 0)
+      ],
+      outputControls: controls,
+      rampDurationSeconds: 0.005
+    )
+    var samples: [Float] = [1, -1]
+
+    let result = samples.withUnsafeMutableBufferPointer { buffer in
+      guard let address = buffer.baseAddress else { return AudioRenderResult.insufficientChannels }
+      let inputs = [UnsafePointer(address)]
+      let outputs = [address]
+      return inputs.withUnsafeBufferPointer { inputChannels in
+        outputs.withUnsafeBufferPointer { outputChannels in
+          processor.process(
+            inputChannels: inputChannels,
+            outputChannels: outputChannels,
+            frameCount: buffer.count
+          )
+        }
+      }
+    }
+
+    #expect(result == .rendered)
+    #expect(samples == [0, 0])
+  }
+
   @Test("Preparation rejects clock and route mismatches")
   func rejectsInvalidPreparation() throws {
     let input = try AudioProcessingFormat(sampleRate: 44_100, channelCount: 1)

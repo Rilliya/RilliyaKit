@@ -93,6 +93,23 @@ struct PreparedAudioProcessorTests {
     #expect(secondOutput == [0.5, 0.25, 0])
   }
 
+  @Test("Prepared gain begins at controls published before preparation")
+  func preparedGainStartsAtPublishedControls() throws {
+    let format = try AudioProcessingFormat(sampleRate: 1_000, channelCount: 1)
+    let preparation = try AudioRenderPreparation(format: format, maximumFrameCount: 2)
+    let controls = try AudioChannelGainControlBank(channelCount: 1)
+    try controls.setMuted(true, at: 0)
+    let processor = try PreparedAudioChannelGainProcessor(
+      preparation: preparation,
+      controls: controls,
+      rampDurationSeconds: 0.005
+    )
+    var output = [Float](repeating: 1, count: 2)
+
+    #expect(processMono(processor, frameCount: 2, output: &output) == .rendered)
+    #expect(output == [0, 0])
+  }
+
   @Test("Prepared gain rejects buffers outside its immutable preparation")
   func preparedGainRejectsInvalidBuffers() throws {
     let format = try AudioProcessingFormat(sampleRate: 48_000, channelCount: 1)

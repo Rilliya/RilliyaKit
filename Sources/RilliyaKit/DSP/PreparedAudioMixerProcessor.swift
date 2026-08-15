@@ -111,8 +111,8 @@ public final class PreparedAudioMixerProcessor: @unchecked Sendable {
     mixStorage.initialize(repeating: 0, count: outputSampleCapacity)
     envelope = .allocate(capacity: preparation.output.maximumFrameCount)
     envelope.initialize(repeating: 1, count: preparation.output.maximumFrameCount)
-    rampStates = (0..<preparation.output.format.channelCount).map { _ in
-      AudioGainRampState(gain: 1)
+    rampStates = (0..<preparation.output.format.channelCount).map { channel in
+      AudioGainRampState(gain: controls.effectiveGain(at: channel))
     }
   }
 
