@@ -28,6 +28,18 @@ public enum AudioDSPConfigurationError: Error, Equatable, LocalizedError, Sendab
   /// A signal generator amplitude must be finite and remain within full scale.
   case invalidGeneratorAmplitude(Float)
 
+  /// A delay duration must be finite and remain within the prepared processor's bound.
+  case invalidDelayDuration(Double)
+
+  /// Delay feedback must be finite and remain below self-oscillation.
+  case invalidDelayFeedback(Float)
+
+  /// A dry/wet mix must be finite and remain between dry and wet.
+  case invalidDryWetMix(Float)
+
+  /// A delay line would exceed the library's bounded storage budget.
+  case delayStorageTooLarge(Int)
+
   /// Latency, intentional delay, and finite tail lengths cannot be negative.
   case invalidTiming
 
@@ -54,6 +66,16 @@ public enum AudioDSPConfigurationError: Error, Equatable, LocalizedError, Sendab
         "Generator frequency must be finite, positive, and below Nyquist; received \(frequency)."
     case .invalidGeneratorAmplitude(let amplitude):
       return "Generator amplitude must be between 0 and 1; received \(amplitude)."
+    case .invalidDelayDuration(let duration):
+      return
+        "Delay duration must be finite, positive, and no greater than 10 seconds; received \(duration)."
+    case .invalidDelayFeedback(let feedback):
+      return "Delay feedback must be finite and between -0.95 and 0.95; received \(feedback)."
+    case .invalidDryWetMix(let mix):
+      return "Dry/wet mix must be finite and between 0 and 1; received \(mix)."
+    case .delayStorageTooLarge(let sampleCount):
+      return
+        "The requested delay line needs \(sampleCount) samples and exceeds the bounded storage budget."
     case .invalidTiming:
       return "Audio timing frame counts cannot be negative."
     case .incompatibleMixerSampleRates:
