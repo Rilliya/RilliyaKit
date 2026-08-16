@@ -15,6 +15,11 @@ version section with migration guidance.
 - Bounded realtime frame transport and prepared audio source and processor contracts.
 - Prepared gain, matrix mixing, delay, noise gate, compressor, and signal generation DSP.
 - Public output-device playback using AUHAL.
+- Bounded local-file decoding and sample-rate conversion using public Core Audio APIs.
+- Bounded background file writing for WAV, AIFF, CAF, and installed public M4A encoders, including
+  collision-safe destination handling and advertised AAC bitrate ranges.
+- Versioned direct-UDP PCM sending and receiving for explicitly configured peers on trusted local
+  networks, with bounded loss concealment and session validation.
 - UI-independent typed graph construction with consumer-defined node values, shared
   connection compatibility, configurable resource limits, and nonrecursive cycle validation.
 - Bounded graph preparation and execution with on-demand activation, prepared source and

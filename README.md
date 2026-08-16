@@ -73,6 +73,7 @@ files still import the modules that define the APIs they use.
 | `RilliyaCapture` | Process-output and device-input capture with bounded meters | `RilliyaCore`, `RilliyaRealtime` |
 | `RilliyaDSP` | Prepared gain, mixing, delay, noise gate, and signal generation | `RilliyaRealtime`, Swift Atomics |
 | `RilliyaFilePlayback` | Bounded background decoding of Core Audio-supported local files into realtime PCM | `RilliyaRealtime` |
+| `RilliyaFileWriting` | Bounded background encoding and file output using installed public Core Audio encoders | `RilliyaRealtime` |
 | `RilliyaNetworkAudio` | Versioned direct-UDP PCM sending and receiving for trusted local networks | `RilliyaRealtime` |
 | `RilliyaPlayback` | Prepared-source playback to a Core Audio output device | `RilliyaCore`, `RilliyaRealtime` |
 | `RilliyaGraph` | UI-independent typed graph construction and validation | None |
@@ -239,6 +240,32 @@ The stream deliberately owns decoding rather than a codec registry. Additional
 format adapters can remain separate modules and feed the same
 `AudioRealtimeFrameBuffer` contract without adding their code to clients that only
 use system formats.
+
+`AudioFileWriter` is the matching sink boundary. A realtime graph writes planar
+Float32 PCM only to its bounded frame buffer; conversion, encoding, disk IO, and
+file finalization run on a utility task. The capability query prevents a host from
+offering codecs for which macOS only supplies a decoder.
+
+```swift
+import RilliyaFileWriting
+
+let configuration = try AudioFileWriterConfiguration(
+  destinationURL: destinationURL,
+  container: .m4a,
+  encoding: .aac(bitRate: 192_000),
+  sampleRate: 48_000,
+  channelCount: 2
+)
+let writer = try AudioFileWriter(configuration: configuration)
+let actualURL = try await writer.start()
+
+// Produce into writer.frameBuffer from one realtime source, then stop that source.
+_ = await writer.stop()
+```
+
+The default collision policy preserves earlier recordings by selecting an unused
+numeric suffix. Replacing a file requires an explicit configuration choice so a
+host can place user confirmation at the UI boundary.
 
 `RilliyaNetworkAudio` provides a focused direct-UDP transport for trusted local
 networks. A sender and receiver agree on one explicit sample rate and channel count;
