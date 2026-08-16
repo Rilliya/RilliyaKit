@@ -10,6 +10,28 @@ version section with migration guidance.
 
 ### Added
 
+- Nothing yet.
+
+### Changed
+
+- Nothing yet.
+
+### Fixed
+
+- Nothing yet.
+
+### Security
+
+- Nothing yet.
+
+### Breaking Changes
+
+- Nothing yet.
+
+## 0.1.0-prealpha.1
+
+### Added
+
 - Focused products for discovery, capture, realtime transport, DSP, and playback.
 - Public process-output, output-device mix, and device-input capture using supported macOS Core
   Audio APIs.
@@ -53,7 +75,3 @@ version section with migration guidance.
   `underlyingError`.
 - `setConnection(id:isEnabled:)` now throws `.missingConnection` for stale identities instead of
   returning `false`.
-
-## 0.1.0-prealpha.1
-
-This section will be finalized from `Unreleased` when the first public prerelease is tagged.
