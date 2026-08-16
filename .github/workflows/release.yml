@@ -22,6 +22,7 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 35
     env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
       RELEASE_VERSION: ${{ inputs.version }}
     steps:
       - name: Check out source
