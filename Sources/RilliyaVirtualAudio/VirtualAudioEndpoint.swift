@@ -158,6 +158,49 @@ public struct VirtualAudioEndpoint: Codable, Equatable, Hashable, Identifiable, 
   }
 }
 
+/// Stable Core Audio device UIDs published for one virtual endpoint.
+///
+/// `visible` is the device shown to ordinary Core Audio clients. `hostBridge` is the hidden,
+/// opposite-direction device used by the application that supplies or consumes the endpoint's
+/// samples. The values are deterministic across driver reloads and contain no HAL object IDs.
+public struct VirtualAudioEndpointDeviceUIDs: Equatable, Hashable, Sendable {
+  /// The user-visible Core Audio device UID.
+  public let visible: String
+
+  /// The hidden device UID used by the endpoint's host application.
+  public let hostBridge: String
+
+  /// Creates a stable pair of virtual device UIDs.
+  public init(visible: String, hostBridge: String) {
+    precondition(!visible.isEmpty)
+    precondition(!hostBridge.isEmpty)
+    self.visible = visible
+    self.hostBridge = hostBridge
+  }
+}
+
+extension VirtualAudioEndpoint {
+  /// The stable visible and host-bridge device UIDs used by the Rilliya driver.
+  public var deviceUIDs: VirtualAudioEndpointDeviceUIDs {
+    let identifier = id.rawValue.uuidString.lowercased()
+    let prefix = "moe.uwucocoa.rilliya.virtual.\(identifier)"
+    let visibleDirection =
+      switch configuration.direction {
+      case .input: "input"
+      case .output: "output"
+      }
+    let bridgeRole =
+      switch configuration.direction {
+      case .input: "feeder"
+      case .output: "reader"
+      }
+    return VirtualAudioEndpointDeviceUIDs(
+      visible: "\(prefix).\(visibleDirection)",
+      hostBridge: "\(prefix).internal.\(bridgeRole)"
+    )
+  }
+}
+
 /// A validation failure that is safe to surface at an application boundary.
 public enum VirtualAudioEndpointValidationError: Error, Equatable, LocalizedError, Sendable {
   /// A display name contains only whitespace.

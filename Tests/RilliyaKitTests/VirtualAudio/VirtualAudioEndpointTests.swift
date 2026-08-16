@@ -5,6 +5,44 @@ import Testing
 
 struct VirtualAudioEndpointTests {
   @Test
+  func endpointPublishesDeterministicVisibleAndBridgeDeviceUIDs() throws {
+    let id = VirtualAudioEndpointID(
+      rawValue: try #require(UUID(uuidString: "3AA8A874-7EB8-48BD-91B0-F01CB2368E8D"))
+    )
+    let input = VirtualAudioEndpoint(
+      id: id,
+      configuration: try VirtualAudioEndpointConfiguration(
+        name: "Remote Microphone",
+        direction: .input
+      )
+    )
+    let output = VirtualAudioEndpoint(
+      id: id,
+      configuration: try VirtualAudioEndpointConfiguration(
+        name: "Remote Speakers",
+        direction: .output
+      )
+    )
+
+    #expect(
+      input.deviceUIDs.visible
+        == "moe.uwucocoa.rilliya.virtual.3aa8a874-7eb8-48bd-91b0-f01cb2368e8d.input"
+    )
+    #expect(
+      input.deviceUIDs.hostBridge
+        == "moe.uwucocoa.rilliya.virtual.3aa8a874-7eb8-48bd-91b0-f01cb2368e8d.internal.feeder"
+    )
+    #expect(
+      output.deviceUIDs.visible
+        == "moe.uwucocoa.rilliya.virtual.3aa8a874-7eb8-48bd-91b0-f01cb2368e8d.output"
+    )
+    #expect(
+      output.deviceUIDs.hostBridge
+        == "moe.uwucocoa.rilliya.virtual.3aa8a874-7eb8-48bd-91b0-f01cb2368e8d.internal.reader"
+    )
+  }
+
+  @Test
   func configurationNormalizesAndValidatesNames() throws {
     let configuration = try VirtualAudioEndpointConfiguration(
       name: "  Remote Microphone  ",
