@@ -11,6 +11,9 @@ public struct VirtualAudioEndpointCatalog: Codable, Equatable, Sendable {
   /// An empty initial catalog.
   public static let empty = VirtualAudioEndpointCatalog()
 
+  /// The largest revision representable by the Audio Server Plug-in property-list ABI.
+  public static let maximumRevision = UInt64(Int64.max)
+
   /// The monotonically increasing catalog revision.
   public private(set) var revision: UInt64
 
@@ -22,6 +25,9 @@ public struct VirtualAudioEndpointCatalog: Codable, Equatable, Sendable {
     revision: UInt64 = 0,
     endpoints: [VirtualAudioEndpoint] = []
   ) throws {
+    guard revision <= Self.maximumRevision else {
+      throw VirtualAudioEndpointCatalogError.revisionOutOfRange(revision)
+    }
     try Self.validate(endpoints)
     self.revision = revision
     self.endpoints = endpoints
@@ -87,11 +93,10 @@ public struct VirtualAudioEndpointCatalog: Codable, Equatable, Sendable {
   }
 
   private func nextRevision() throws -> UInt64 {
-    let result = revision.addingReportingOverflow(1)
-    guard !result.overflow else {
+    guard revision < Self.maximumRevision else {
       throw VirtualAudioEndpointCatalogError.revisionExhausted
     }
-    return result.partialValue
+    return revision + 1
   }
 
   private func ensureUniqueName(
@@ -154,6 +159,9 @@ public enum VirtualAudioEndpointCatalogError: Error, Equatable, LocalizedError, 
   /// The monotonic revision cannot be advanced safely.
   case revisionExhausted
 
+  /// A persisted revision cannot be represented by the driver property-list ABI.
+  case revisionOutOfRange(UInt64)
+
   /// A human-readable explanation suitable for application diagnostics.
   public var errorDescription: String? {
     switch self {
@@ -165,6 +173,8 @@ public enum VirtualAudioEndpointCatalogError: Error, Equatable, LocalizedError, 
       "Virtual audio endpoint \(id.rawValue.uuidString) does not exist."
     case .revisionExhausted:
       "The virtual audio endpoint catalog revision cannot be advanced."
+    case .revisionOutOfRange(let revision):
+      "Virtual audio endpoint catalog revision \(revision) exceeds the supported maximum."
     }
   }
 }

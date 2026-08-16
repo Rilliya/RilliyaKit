@@ -126,7 +126,7 @@ struct VirtualAudioEndpointTests {
       )
     )
     var catalog = try VirtualAudioEndpointCatalog(
-      revision: .max,
+      revision: VirtualAudioEndpointCatalog.maximumRevision,
       endpoints: [endpoint]
     )
 
@@ -139,8 +139,17 @@ struct VirtualAudioEndpointTests {
         )
       )
     }
-    #expect(catalog.revision == .max)
+    #expect(catalog.revision == VirtualAudioEndpointCatalog.maximumRevision)
     #expect(catalog.endpoints == [endpoint])
+  }
+
+  @Test
+  func catalogRejectsRevisionsTheDriverCannotRepresent() {
+    #expect(
+      throws: VirtualAudioEndpointCatalogError.revisionOutOfRange(UInt64(Int64.max) + 1)
+    ) {
+      try VirtualAudioEndpointCatalog(revision: UInt64(Int64.max) + 1)
+    }
   }
 
   @Test
