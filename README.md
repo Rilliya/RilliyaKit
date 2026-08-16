@@ -76,6 +76,7 @@ files still import the modules that define the APIs they use.
 | `RilliyaFileWriting` | Bounded background encoding and file output using installed public Core Audio encoders | `RilliyaRealtime` |
 | `RilliyaNetworkAudio` | Versioned direct-UDP PCM sending and receiving for trusted local networks | `RilliyaRealtime` |
 | `RilliyaPlayback` | Prepared-source playback to a Core Audio output device | `RilliyaCore`, `RilliyaRealtime` |
+| `RilliyaVirtualAudio` | Stable, validated models for globally managed virtual audio endpoints | None |
 | `RilliyaGraph` | UI-independent typed graph construction and validation | None |
 | `RilliyaEngine` | Bounded graph preparation, execution, and asynchronous analysis windows | `RilliyaGraph`, `RilliyaRealtime` |
 | `RilliyaCaptureNodes` | Ready-to-connect application and device capture nodes | `RilliyaCore`, `RilliyaCapture`, `RilliyaEngine`, `RilliyaGraph`, `RilliyaRealtime` |
@@ -221,6 +222,32 @@ if let deviceID = snapshot.inputDevices.first?.id {
 The host application is responsible for requesting microphone permission before
 constructing an input capture. RilliyaKit reports permission and native lifecycle
 failures as typed `DeviceInputCaptureError` values.
+
+`RilliyaVirtualAudio` defines the persistent boundary between workflows, a device manager, and a
+Core Audio driver. An input endpoint supplies Rilliya audio to other applications; an output
+endpoint accepts other applications' audio for Rilliya to consume. The catalog stores stable UUIDs
+rather than transient HAL object IDs, rejects ambiguous names, and advances a revision with every
+successful mutation:
+
+```swift
+import RilliyaVirtualAudio
+
+var catalog = VirtualAudioEndpointCatalog.empty
+let remoteMicrophone = try catalog.create(
+  VirtualAudioEndpointConfiguration(
+    name: "Remote Microphone",
+    direction: .input,
+    format: VirtualAudioEndpointFormat(sampleRate: 48_000, channelCount: 1)
+  )
+)
+
+// Persist remoteMicrophone.id in any workflow that targets this global device.
+```
+
+These values do not install a driver or claim that a virtual device is active. A host must reconcile
+the catalog with an Audio Server plug-in and report driver state separately. Keeping the pure model
+independent lets command-line tools and third-party device managers reuse it without linking the
+Rilliya application.
 
 `PreparedAudioSignalGeneratorSource` provides prepared sine, band-limited square,
 triangle, and sawtooth oscillators plus deterministic white, pink, and brown noise.
