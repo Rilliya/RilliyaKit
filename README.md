@@ -247,7 +247,8 @@ let remoteMicrophone = try catalog.create(
 These values do not install a driver or claim that a virtual device is active. A host must reconcile
 the catalog with an Audio Server plug-in and report driver state separately. Keeping the pure model
 independent lets command-line tools and third-party device managers reuse it without linking the
-Rilliya application.
+Rilliya application. See [Integrating the virtual audio driver](Documentation/VirtualAudioDriverIntegration.md)
+for the driver boundary, signing requirements, and a complete endpoint-management example.
 
 `PreparedAudioSignalGeneratorSource` provides prepared sine, band-limited square,
 triangle, and sawtooth oscillators plus deterministic white, pink, and brown noise.

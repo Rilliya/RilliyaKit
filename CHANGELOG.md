@@ -49,6 +49,9 @@ version section with migration guidance.
   processor adapters, and asynchronous overlapping analysis-window sinks.
 - Ready-to-connect application-output, output-device mix, and input-device graph source nodes that
   avoid unused meter work, plus a closure-backed terminal audio-window analyzer node.
+- Validated, persistent virtual audio endpoint models, deterministic visible and bridge device UIDs,
+  and an actor-isolated store for reconciling endpoint catalogs with the Rilliya Audio Server
+  plug-in.
 - Structured graph and engine failures with exact node, connection, and port context, preserved
   custom-node errors, recovery suggestions, and bounded asynchronous engine-state observation.
 
