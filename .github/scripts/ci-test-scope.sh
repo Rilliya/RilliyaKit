@@ -30,7 +30,7 @@ for path in "$@"; do
       run_engine=true
       run_capture_nodes=true
       ;;
-    Sources/RilliyaDiscovery/* | Sources/RilliyaDSP/* | Sources/RilliyaPlayback/*)
+    Sources/RilliyaDiscovery/* | Sources/RilliyaDSP/* | Sources/RilliyaPlayback/* | Sources/RilliyaFilePlayback/* | Sources/RilliyaFileWriting/* | Sources/RilliyaNetworkAudio/*)
       run_build=true
       run_kit=true
       ;;

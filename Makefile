@@ -4,9 +4,12 @@ SWIFT := xcrun swift
 SWIFT_FORMAT := xcrun swift-format
 SWIFT_INPUTS := Package.swift Sources Tests Examples/Package.swift Examples/Sources
 
-.PHONY: all format format-check build-debug build-release build-examples test check clean
+.PHONY: all repository-hygiene format format-check build-debug build-release build-examples test check clean
 
 all: check
+
+repository-hygiene:
+	./scripts/check-repository-hygiene.sh
 
 format:
 	$(SWIFT_FORMAT) format --configuration .swift-format --in-place --parallel --recursive $(SWIFT_INPUTS)
@@ -26,7 +29,7 @@ build-examples:
 test:
 	$(SWIFT) test --configuration debug --parallel
 
-check: format-check build-debug build-release build-examples test
+check: repository-hygiene format-check build-debug build-release build-examples test
 
 clean:
 	$(SWIFT) package clean

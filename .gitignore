@@ -8,3 +8,25 @@
 /Examples/Package.resolved
 *.xcodeproj
 xcuserdata/
+
+# Local planning, audits, signing material, and generated measurements
+/plans/
+/design/
+/audits/
+/benchmarks/
+/performance/
+/profiles/
+/PERFORMANCE*.md
+/AUDIT*.md
+*.cer
+*.key
+*.keychain-db
+*.mobileprovision
+*.p12
+*.pem
+*.pfx
+*.provisionprofile
+*.profdata
+*.profraw
+*.trace
+*.xcresult

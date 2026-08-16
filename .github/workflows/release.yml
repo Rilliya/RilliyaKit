@@ -1,0 +1,96 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Prerelease version documented in CHANGELOG.md
+        required: true
+        default: 0.1.0-prealpha.1
+        type: string
+
+concurrency:
+  group: release-${{ inputs.version }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Validate and publish source package
+    runs-on: macos-15
+    timeout-minutes: 35
+    env:
+      RELEASE_VERSION: ${{ inputs.version }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate release version
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Release version is not valid: $RELEASE_VERSION" >&2
+            exit 1
+          fi
+          if ! grep -Fqx "## $RELEASE_VERSION" CHANGELOG.md; then
+            echo "CHANGELOG.md has no section for $RELEASE_VERSION" >&2
+            exit 1
+          fi
+          if grep -A3 -F "## $RELEASE_VERSION" CHANGELOG.md \
+            | grep -Fq 'will be finalized'; then
+            echo "Finalize the $RELEASE_VERSION changelog before release" >&2
+            exit 1
+          fi
+
+      - name: Fingerprint Swift toolchain
+        id: toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          xcrun swift --version
+          fingerprint="$(xcodebuild -version | shasum -a 256 | cut -d ' ' -f 1)"
+          echo "fingerprint=$fingerprint" >> "$GITHUB_OUTPUT"
+
+      - name: Restore SwiftPM cache
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            .build
+            Examples/.build
+            ~/.swiftpm
+            ~/Library/Caches/org.swift.swiftpm
+          key: swiftpm-release-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.fingerprint }}-${{ hashFiles('Package.swift', 'Examples/Package.swift') }}
+
+      - name: Validate source package
+        run: make check
+
+      - name: Publish GitHub prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="v$RELEASE_VERSION"
+          if git rev-parse "$tag" >/dev/null 2>&1; then
+            if [[ "$(git rev-list -n 1 "$tag")" != "$GITHUB_SHA" ]]; then
+              echo "$tag already points to another commit" >&2
+              exit 1
+            fi
+          fi
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "$tag is already published"
+          else
+            gh release create "$tag" \
+              --target "$GITHUB_SHA" \
+              --title "RilliyaKit $RELEASE_VERSION" \
+              --generate-notes \
+              --prerelease
+          fi
