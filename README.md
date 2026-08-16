@@ -4,8 +4,10 @@ RilliyaKit is the open-source audio foundation behind Rilliya. It provides
 macOS-native building blocks for discovering, capturing, metering, processing,
 and playing audio without depending on application UI types.
 
-The package is under active development and currently requires macOS 14.2 or
-later and Swift 6.
+The package is preparing its first public prerelease, `0.1.0-prealpha.1`, and
+currently requires macOS 14.2 or later and Swift 6. Public API may change before
+1.0, but released breaking changes are documented with migration guidance in
+the [changelog](CHANGELOG.md) and governed by the [API stability policy](API_STABILITY.md).
 
 ## Using the package locally
 
@@ -172,6 +174,10 @@ make check
 
 `make check` runs formatting validation, debug and release builds, and all unit
 tests. Tests do not require audio hardware or privacy permissions.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for public API and realtime contribution
+requirements. Please report security and privacy issues through the private process
+described in [SECURITY.md](SECURITY.md).
 
 ## License
 
