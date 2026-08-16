@@ -73,6 +73,7 @@ files still import the modules that define the APIs they use.
 | `RilliyaCapture` | Process-output and device-input capture with bounded meters | `RilliyaCore`, `RilliyaRealtime` |
 | `RilliyaDSP` | Prepared gain, mixing, delay, noise gate, and signal generation | `RilliyaRealtime`, Swift Atomics |
 | `RilliyaFilePlayback` | Bounded background decoding of Core Audio-supported local files into realtime PCM | `RilliyaRealtime` |
+| `RilliyaNetworkAudio` | Versioned direct-UDP PCM sending and receiving for trusted local networks | `RilliyaRealtime` |
 | `RilliyaPlayback` | Prepared-source playback to a Core Audio output device | `RilliyaCore`, `RilliyaRealtime` |
 | `RilliyaGraph` | UI-independent typed graph construction and validation | None |
 | `RilliyaEngine` | Bounded graph preparation, execution, and asynchronous analysis windows | `RilliyaGraph`, `RilliyaRealtime` |
@@ -238,6 +239,29 @@ The stream deliberately owns decoding rather than a codec registry. Additional
 format adapters can remain separate modules and feed the same
 `AudioRealtimeFrameBuffer` contract without adding their code to clients that only
 use system formats.
+
+`RilliyaNetworkAudio` provides a focused direct-UDP transport for trusted local
+networks. A sender and receiver agree on one explicit sample rate and channel count;
+the versioned packet header carries a session ID and monotonic sequence, and both
+sides use fixed-capacity PCM queues. Network IO, packet allocation, validation, and
+interleaving remain away from the graph render path.
+
+```swift
+import RilliyaNetworkAudio
+
+let format = try NetworkAudioStreamFormat(sampleRate: 48_000, channelCount: 2)
+let receiver = try NetworkAudioReceiver(
+  configuration: NetworkAudioReceiverConfiguration(port: 48_620, format: format)
+)
+try receiver.start()
+
+// Connect receiver.frameBuffer to one prepared graph consumer.
+```
+
+This first transport is intentionally not RTMP and does not provide encryption,
+authentication, retransmission, internet congestion control, or codec compression.
+Use it only on a trusted LAN. Streaming-service protocols and secure remote-network
+transports belong in separate modules so clients do not pay for them accidentally.
 
 ## Custom realtime sources and processors
 
