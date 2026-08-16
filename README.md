@@ -72,6 +72,7 @@ files still import the modules that define the APIs they use.
 | `RilliyaDiscovery` | Public Core Audio process and device catalog discovery | `RilliyaCore` |
 | `RilliyaCapture` | Process-output and device-input capture with bounded meters | `RilliyaCore`, `RilliyaRealtime` |
 | `RilliyaDSP` | Prepared gain, mixing, delay, noise gate, and signal generation | `RilliyaRealtime`, Swift Atomics |
+| `RilliyaFilePlayback` | Bounded background decoding of Core Audio-supported local files into realtime PCM | `RilliyaRealtime` |
 | `RilliyaPlayback` | Prepared-source playback to a Core Audio output device | `RilliyaCore`, `RilliyaRealtime` |
 | `RilliyaGraph` | UI-independent typed graph construction and validation | None |
 | `RilliyaEngine` | Bounded graph preparation, execution, and asynchronous analysis windows | `RilliyaGraph`, `RilliyaRealtime` |
@@ -81,8 +82,9 @@ files still import the modules that define the APIs they use.
 For example, an app that already knows a device UID and only needs to send a
 custom realtime source to that device can depend on `RilliyaCore`,
 `RilliyaRealtime`, and `RilliyaPlayback`. It does not need to build discovery,
-capture, or DSP code. Library linkage is intentionally left unspecified so Swift
-Package Manager can choose the appropriate linkage for each client build.
+capture, file decoding, or DSP code. Library linkage is intentionally left
+unspecified so Swift Package Manager can choose the appropriate linkage for each
+client build.
 
 Public APIs use RilliyaKit value types rather than transient Core Audio object
 identifiers. Realtime objects are explicitly prepared with bounded storage before
@@ -211,6 +213,31 @@ let source = try PreparedAudioSignalGeneratorSource(
   )
 )
 ```
+
+`AudioFileFrameStream` opens any local format supported by Core Audio, decodes and
+sample-rate converts it away from the realtime thread, and publishes planar Float32
+PCM through one fixed-capacity buffer. It supports one pass, a bounded finite play
+count, or continuous looping without loading the complete file into memory:
+
+```swift
+import RilliyaFilePlayback
+
+let configuration = try AudioFileFrameStreamConfiguration(
+  sampleRate: 48_000,
+  loopMode: .playCount(3)
+)
+let file = try AudioFileFrameStream(url: fileURL, configuration: configuration)
+
+file.start()
+// Connect file.frameBuffer to one prepared graph consumer.
+// Later, wait for deterministic teardown:
+await file.stop()
+```
+
+The stream deliberately owns decoding rather than a codec registry. Additional
+format adapters can remain separate modules and feed the same
+`AudioRealtimeFrameBuffer` contract without adding their code to clients that only
+use system formats.
 
 ## Custom realtime sources and processors
 

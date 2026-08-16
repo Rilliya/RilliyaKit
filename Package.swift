@@ -17,6 +17,7 @@ let package = Package(
         "RilliyaDiscovery",
         "RilliyaCapture",
         "RilliyaDSP",
+        "RilliyaFilePlayback",
         "RilliyaPlayback",
         "RilliyaGraph",
         "RilliyaEngine",
@@ -28,6 +29,7 @@ let package = Package(
     .library(name: "RilliyaDiscovery", targets: ["RilliyaDiscovery"]),
     .library(name: "RilliyaCapture", targets: ["RilliyaCapture"]),
     .library(name: "RilliyaDSP", targets: ["RilliyaDSP"]),
+    .library(name: "RilliyaFilePlayback", targets: ["RilliyaFilePlayback"]),
     .library(name: "RilliyaPlayback", targets: ["RilliyaPlayback"]),
     .library(name: "RilliyaGraph", targets: ["RilliyaGraph"]),
     .library(name: "RilliyaEngine", targets: ["RilliyaEngine"]),
@@ -63,6 +65,10 @@ let package = Package(
       name: "RilliyaPlayback",
       dependencies: ["RilliyaCore", "RilliyaRealtime"]
     ),
+    .target(
+      name: "RilliyaFilePlayback",
+      dependencies: ["RilliyaRealtime"]
+    ),
     .target(name: "RilliyaGraph"),
     .target(
       name: "RilliyaEngine",
@@ -86,6 +92,7 @@ let package = Package(
         "RilliyaDiscovery",
         "RilliyaCapture",
         "RilliyaDSP",
+        "RilliyaFilePlayback",
         "RilliyaPlayback",
       ]
     ),
