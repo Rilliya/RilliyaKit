@@ -15,6 +15,11 @@ Run the complete local validation before submitting a change:
 make check
 ```
 
+GitHub CI always builds every product and example for code changes, then selects the affected unit
+test targets from module dependency direction. Root build configuration and CI changes run the
+entire suite. Documentation-only changes skip the macOS runner. This selection reduces hosted
+macOS time without treating a focused test run as an integration build substitute.
+
 Useful focused commands are:
 
 ```sh
@@ -63,4 +68,3 @@ baseline rather than intuition.
 - Do not add personal signing identities, local absolute paths, private repository dependencies,
   credentials, or test media to tracked files.
 - Use Conventional Commit messages for code changes.
-

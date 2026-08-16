@@ -1,0 +1,123 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  scope:
+    name: Select validation scope
+    runs-on: ubuntu-latest
+    outputs:
+      test-scope: ${{ steps.scope.outputs.test-scope }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Select affected test targets
+        id: scope
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          PULL_REQUEST_BASE: ${{ github.event.pull_request.base.sha }}
+          PUSH_BASE: ${{ github.event.before }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "$EVENT_NAME" == "workflow_dispatch" || "$REF_TYPE" == "tag" ]]; then
+            scope="all"
+          else
+            base="$PUSH_BASE"
+            if [[ "$EVENT_NAME" == "pull_request" ]]; then
+              base="$PULL_REQUEST_BASE"
+            fi
+
+            if [[ -z "$base" || "$base" =~ ^0+$ ]]; then
+              scope="all"
+            else
+              mapfile -d '' changed_files < <(git diff --name-only -z "$base" "$GITHUB_SHA")
+              scope="$(.github/scripts/ci-test-scope.sh "${changed_files[@]}")"
+            fi
+          fi
+
+          echo "Selected test scope: $scope"
+          echo "test-scope=$scope" >> "$GITHUB_OUTPUT"
+
+      - name: Verify scope mapping
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(.github/scripts/ci-test-scope.sh README.md)" == "skip" ]]
+          [[ "$(.github/scripts/ci-test-scope.sh Examples/Sources/MinimalGraph/main.swift)" == "build" ]]
+          [[ "$(.github/scripts/ci-test-scope.sh Sources/RilliyaCaptureNodes/AudioCaptureNodes.swift)" == '^(RilliyaCaptureNodesTests)\.' ]]
+          [[ "$(.github/scripts/ci-test-scope.sh Sources/RilliyaGraph/AudioGraphNode.swift)" == '^(RilliyaGraphTests|RilliyaEngineTests|RilliyaCaptureNodesTests)\.' ]]
+          [[ "$(.github/scripts/ci-test-scope.sh Package.swift)" == "all" ]]
+
+  validate:
+    name: Validate Swift package
+    needs: scope
+    if: needs.scope.outputs.test-scope != 'skip'
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Fingerprint Swift toolchain
+        id: toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          xcrun swift --version
+          fingerprint="$(xcodebuild -version | shasum -a 256 | cut -d ' ' -f 1)"
+          echo "fingerprint=$fingerprint" >> "$GITHUB_OUTPUT"
+
+      - name: Restore SwiftPM cache
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            .build
+            Examples/.build
+            ~/.swiftpm
+            ~/Library/Caches/org.swift.swiftpm
+          key: swiftpm-${{ runner.os }}-${{ runner.arch }}-${{ steps.toolchain.outputs.fingerprint }}-${{ hashFiles('Package.swift', 'Examples/Package.swift') }}
+
+      - name: Validate formatting
+        run: make format-check
+
+      - name: Build every product
+        run: |
+          xcrun swift build --configuration debug --explicit-target-dependency-import-check error
+          xcrun swift build --configuration release --explicit-target-dependency-import-check error
+
+      - name: Build examples
+        run: xcrun swift build --package-path Examples --configuration debug
+
+      - name: Run all unit tests
+        if: needs.scope.outputs.test-scope == 'all'
+        run: xcrun swift test --configuration debug --parallel
+
+      - name: Run affected unit tests
+        if: >-
+          needs.scope.outputs.test-scope != 'all' &&
+          needs.scope.outputs.test-scope != 'build'
+        env:
+          TEST_FILTER: ${{ needs.scope.outputs.test-scope }}
+        run: xcrun swift test --configuration debug --parallel --filter "$TEST_FILTER"

@@ -24,7 +24,8 @@ version section with migration guidance.
 
 ### Changed
 
-- Nothing yet.
+- GitHub CI builds every product and example for code changes, caches SwiftPM work by toolchain,
+  and selects affected unit-test targets from module dependencies.
 
 ### Fixed
 
