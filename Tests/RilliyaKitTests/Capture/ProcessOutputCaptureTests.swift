@@ -27,8 +27,35 @@ struct ProcessOutputCaptureTests {
     #expect(capture.muteBehavior == .mutedWhileTapped)
     #expect(capture.format.sampleRate == 48_000)
     #expect(capture.format.channelIDs.count == 2)
-    #expect(capture.frameBuffer.format.channelCount == 2)
+    #expect(try capture.subscribeToFrames().format.channelCount == 2)
     #expect(!capture.isRunning)
+  }
+
+  @Test("Frame subscribers own independent bounded queues")
+  func publishesIndependentFrameSubscriptions() throws {
+    let processID = try #require(AudioProcessID(rawValue: 42))
+    let resource = try StubProcessOutputCaptureResource(
+      format: captureFormat(processID: processID),
+      additionalSubscriberCount: 2
+    )
+    let capture = try ProcessOutputCapture(
+      processID: processID,
+      configuration: ProcessOutputCaptureConfiguration(
+        maximumAdditionalFrameSubscriberCount: 2
+      ),
+      backend: StubProcessOutputCaptureBackend(resource: resource),
+      snapshotHandler: { _ in }
+    )
+
+    let first = try capture.subscribeToFrames()
+    let second = try capture.subscribeToFrames()
+
+    #expect(first.frameBuffer !== second.frameBuffer)
+    #expect(first.frameBuffer !== capture.frameBuffer)
+    #expect(second.frameBuffer !== capture.frameBuffer)
+    #expect(throws: AudioRealtimeFrameDistributorError.subscriberLimitReached(3)) {
+      try capture.subscribeToFrames()
+    }
   }
 
   @Test("Start is idempotent while running and stop is terminal")
@@ -116,24 +143,32 @@ private final class StubProcessOutputCaptureResource:
   ProcessOutputCaptureResource, @unchecked Sendable
 {
   let format: ProcessOutputCaptureFormat
+  let frameDistributor: AudioRealtimeFrameDistributor
   let frameBuffer: AudioRealtimeFrameBuffer
 
   private let lock = NSLock()
+  private let compatibilitySubscription: AudioRealtimeFrameSubscription
   private let startError: ProcessOutputCaptureError?
   private var storedStartCallCount = 0
   private var storedStopCallCount = 0
 
   init(
     format: ProcessOutputCaptureFormat,
-    startError: ProcessOutputCaptureError? = nil
+    startError: ProcessOutputCaptureError? = nil,
+    additionalSubscriberCount: Int = 1
   ) throws {
     self.format = format
-    frameBuffer = try AudioRealtimeFrameBuffer(
+    let frameDistributor = try AudioRealtimeFrameDistributor(
       format: try AudioProcessingFormat(
         sampleRate: format.sampleRate,
         channelCount: format.channelIDs.count
-      )
+      ),
+      maximumSubscriberCount: additionalSubscriberCount + 1
     )
+    let compatibilitySubscription = try frameDistributor.subscribe()
+    self.frameDistributor = frameDistributor
+    frameBuffer = compatibilitySubscription.frameBuffer
+    self.compatibilitySubscription = compatibilitySubscription
     self.startError = startError
   }
 

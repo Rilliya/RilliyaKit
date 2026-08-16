@@ -4,10 +4,13 @@ import Foundation
 import RilliyaCore
 import RilliyaRealtime
 
-/// Configuration for bounded audio meter snapshots.
-public struct AudioMeterCaptureConfiguration: Hashable, Sendable {
+/// Configuration for bounded native audio capture delivery.
+public struct AudioCaptureConfiguration: Hashable, Sendable {
   /// The largest waveform array accepted by the capture implementation.
   public static let maximumWaveformSampleCount = 512
+
+  /// The largest number of additional frame subscribers accepted by one capture.
+  public static let maximumAdditionalFrameSubscriberCountLimit = 63
 
   /// The requested maximum number of snapshots delivered each second.
   public let updatesPerSecond: Int
@@ -21,15 +24,21 @@ public struct AudioMeterCaptureConfiguration: Hashable, Sendable {
   /// Whether capture computes and publishes meter and waveform snapshots.
   public let publishesMeterSnapshots: Bool
 
+  /// The additional independently paced frame subscribers prepared before capture begins.
+  ///
+  /// Every capture also reserves one queue for its compatibility `frameBuffer` view.
+  public let maximumAdditionalFrameSubscriberCount: Int
+
   /// Creates a bounded meter capture configuration.
   ///
-  /// Values are clamped to safe visualizer ranges: 1...60 updates per second, 1...512 waveform
-  /// samples, and -200...-1 dB for the display floor.
+  /// Values are clamped to safe ranges: 1...60 updates per second, 1...512 waveform samples,
+  /// -200...-1 dB for the display floor, and 0...63 additional frame subscribers.
   public init(
     updatesPerSecond: Int = 30,
     waveformSampleCount: Int = 128,
     minimumDecibels: Float = -120,
-    publishesMeterSnapshots: Bool = true
+    publishesMeterSnapshots: Bool = true,
+    maximumAdditionalFrameSubscriberCount: Int = 3
   ) {
     let finiteMinimumDecibels = minimumDecibels.isFinite ? minimumDecibels : -120
     self.updatesPerSecond = min(max(updatesPerSecond, 1), 60)
@@ -39,11 +48,18 @@ public struct AudioMeterCaptureConfiguration: Hashable, Sendable {
     )
     self.minimumDecibels = min(max(finiteMinimumDecibels, -200), -1)
     self.publishesMeterSnapshots = publishesMeterSnapshots
+    self.maximumAdditionalFrameSubscriberCount = min(
+      max(maximumAdditionalFrameSubscriberCount, 0),
+      Self.maximumAdditionalFrameSubscriberCountLimit
+    )
   }
 }
 
+/// A source-compatible spelling for the unified native capture configuration.
+public typealias AudioMeterCaptureConfiguration = AudioCaptureConfiguration
+
 /// The meter configuration accepted by process-output capture.
-public typealias ProcessOutputCaptureConfiguration = AudioMeterCaptureConfiguration
+public typealias ProcessOutputCaptureConfiguration = AudioCaptureConfiguration
 
 /// How the tapped process reaches its ordinary hardware destination while capture is active.
 public enum ProcessOutputCaptureMuteBehavior: Hashable, Sendable {
@@ -273,8 +289,8 @@ public final class ProcessOutputCapture: @unchecked Sendable {
 
   /// Bounded native PCM frames produced by this capture.
   ///
-  /// One serialized render consumer may read this buffer while capture IO is running. The buffer
-  /// never allocates or invokes application code from the Core Audio IO procedure.
+  /// This compatibility view supports exactly one serialized consumer. New code that may share a
+  /// capture across workflows or output clocks should use ``subscribeToFrames()`` instead.
   public let frameBuffer: AudioRealtimeFrameBuffer
 
   private enum State {
@@ -344,6 +360,18 @@ public final class ProcessOutputCapture: @unchecked Sendable {
     return state == .running
   }
 
+  /// Creates an independently paced, bounded PCM subscription.
+  ///
+  /// Subscription management may lock and must not run on an audio callback. Each returned
+  /// subscription has its own queue and consumer cursor. The fixed limit comes from the capture
+  /// configuration supplied during initialization.
+  ///
+  /// - Throws: ``AudioRealtimeFrameDistributorError/subscriberLimitReached(_:)`` when every
+  ///   prepared subscription is active.
+  public func subscribeToFrames() throws -> AudioRealtimeFrameSubscription {
+    try resource.frameDistributor.subscribe()
+  }
+
   /// Starts delivering process-output meter snapshots.
   public func start() throws {
     lock.lock()
@@ -390,6 +418,7 @@ protocol ProcessOutputCaptureBackend: Sendable {
 
 protocol ProcessOutputCaptureResource: AnyObject, Sendable {
   var format: ProcessOutputCaptureFormat { get }
+  var frameDistributor: AudioRealtimeFrameDistributor { get }
   var frameBuffer: AudioRealtimeFrameBuffer { get }
 
   func start() throws

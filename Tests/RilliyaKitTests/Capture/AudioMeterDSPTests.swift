@@ -105,7 +105,8 @@ struct AudioMeterDSPTests {
     let configuration = AudioMeterCaptureConfiguration(
       updatesPerSecond: 500,
       waveformSampleCount: 10_000,
-      minimumDecibels: -500
+      minimumDecibels: -500,
+      maximumAdditionalFrameSubscriberCount: 500
     )
 
     #expect(configuration.updatesPerSecond == 60)
@@ -114,9 +115,17 @@ struct AudioMeterDSPTests {
         == AudioMeterCaptureConfiguration.maximumWaveformSampleCount
     )
     #expect(configuration.minimumDecibels == -200)
+    #expect(
+      configuration.maximumAdditionalFrameSubscriberCount
+        == AudioCaptureConfiguration.maximumAdditionalFrameSubscriberCountLimit
+    )
 
     let nonfiniteConfiguration = AudioMeterCaptureConfiguration(minimumDecibels: .nan)
     #expect(nonfiniteConfiguration.minimumDecibels == -120)
+    #expect(
+      AudioCaptureConfiguration(maximumAdditionalFrameSubscriberCount: -1)
+        .maximumAdditionalFrameSubscriberCount == 0
+    )
 
     let processCompatibilityConfiguration = ProcessOutputCaptureConfiguration()
     #expect(processCompatibilityConfiguration == AudioMeterCaptureConfiguration())

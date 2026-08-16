@@ -94,14 +94,22 @@ struct AudioCaptureNodesTests {
 }
 
 private final class StubCaptureSession: AudioGraphCaptureSession, @unchecked Sendable {
-  let frameBuffer: AudioRealtimeFrameBuffer
+  let frameDistributor: AudioRealtimeFrameDistributor
 
   private let lock = NSLock()
   private var starts = 0
   private var stops = 0
 
   init(format: AudioProcessingFormat) throws {
-    frameBuffer = try AudioRealtimeFrameBuffer(format: format, capacityFrameCount: 8)
+    frameDistributor = try AudioRealtimeFrameDistributor(
+      format: format,
+      capacityFrameCount: 8,
+      maximumSubscriberCount: 1
+    )
+  }
+
+  func subscribeToFrames() throws -> AudioRealtimeFrameSubscription {
+    try frameDistributor.subscribe()
   }
 
   var startCount: Int {
@@ -125,7 +133,7 @@ private final class StubCaptureSession: AudioGraphCaptureSession, @unchecked Sen
       guard let baseAddress = samples.baseAddress else { return }
       var channel = UnsafePointer(baseAddress)
       withUnsafePointer(to: &channel) { channels in
-        _ = frameBuffer.writePlanar(
+        _ = frameDistributor.writePlanar(
           UnsafeBufferPointer(start: channels, count: 1),
           frameCount: samples.count
         )

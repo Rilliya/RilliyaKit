@@ -5,7 +5,7 @@ import RilliyaCore
 import RilliyaRealtime
 
 /// The meter configuration accepted by output-device capture.
-public typealias DeviceOutputCaptureConfiguration = AudioMeterCaptureConfiguration
+public typealias DeviceOutputCaptureConfiguration = AudioCaptureConfiguration
 
 /// The output device to resolve when preparing a capture.
 public enum DeviceOutputCaptureTarget: Hashable, Sendable {
@@ -252,8 +252,8 @@ public final class DeviceOutputCapture: @unchecked Sendable {
 
   /// Bounded native PCM frames produced by this capture.
   ///
-  /// One serialized render consumer may read this buffer while capture IO is running. The buffer
-  /// never allocates or invokes application code from the Core Audio IO procedure.
+  /// This compatibility view supports exactly one serialized consumer. New code that may share a
+  /// capture across workflows or output clocks should use ``subscribeToFrames()`` instead.
   public let frameBuffer: AudioRealtimeFrameBuffer
 
   private enum State {
@@ -338,6 +338,18 @@ public final class DeviceOutputCapture: @unchecked Sendable {
     lock.withLock { state == .running }
   }
 
+  /// Creates an independently paced, bounded PCM subscription.
+  ///
+  /// Subscription management may lock and must not run on an audio callback. Each returned
+  /// subscription has its own queue and consumer cursor. The fixed limit comes from the capture
+  /// configuration supplied during initialization.
+  ///
+  /// - Throws: ``AudioRealtimeFrameDistributorError/subscriberLimitReached(_:)`` when every
+  ///   prepared subscription is active.
+  public func subscribeToFrames() throws -> AudioRealtimeFrameSubscription {
+    try resource.frameDistributor.subscribe()
+  }
+
   /// Starts delivering output-device PCM and meter snapshots.
   public func start() throws {
     try lock.withLock {
@@ -384,6 +396,7 @@ protocol DeviceOutputCaptureBackend: Sendable {
 
 protocol DeviceOutputCaptureResource: AnyObject, Sendable {
   var format: DeviceOutputCaptureFormat { get }
+  var frameDistributor: AudioRealtimeFrameDistributor { get }
   var frameBuffer: AudioRealtimeFrameBuffer { get }
 
   func start() throws

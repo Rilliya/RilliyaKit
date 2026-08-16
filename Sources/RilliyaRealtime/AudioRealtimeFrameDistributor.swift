@@ -237,6 +237,10 @@ public final class AudioRealtimeFrameSubscription: @unchecked Sendable {
   private let cancellationLock = NSLock()
   private var didCancel = false
 
+  package var frameBuffer: AudioRealtimeFrameBuffer {
+    slot.frameBuffer
+  }
+
   fileprivate init(slot: AudioRealtimeFrameDistributionSlot, generation: UInt64) {
     self.slot = slot
     self.generation = generation

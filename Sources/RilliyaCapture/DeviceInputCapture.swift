@@ -184,8 +184,8 @@ public final class DeviceInputCapture: @unchecked Sendable {
 
   /// Bounded native PCM frames produced by this capture.
   ///
-  /// One serialized render consumer may read this buffer while device IO is running. The buffer
-  /// never allocates or invokes application code from the Core Audio render callback.
+  /// This compatibility view supports exactly one serialized consumer. New code that may share a
+  /// capture across workflows or output clocks should use ``subscribeToFrames()`` instead.
   public let frameBuffer: AudioRealtimeFrameBuffer
 
   private enum State {
@@ -254,6 +254,18 @@ public final class DeviceInputCapture: @unchecked Sendable {
     return state == .running
   }
 
+  /// Creates an independently paced, bounded PCM subscription.
+  ///
+  /// Subscription management may lock and must not run on an audio callback. Each returned
+  /// subscription has its own queue and consumer cursor. The fixed limit comes from the capture
+  /// configuration supplied during initialization.
+  ///
+  /// - Throws: ``AudioRealtimeFrameDistributorError/subscriberLimitReached(_:)`` when every
+  ///   prepared subscription is active.
+  public func subscribeToFrames() throws -> AudioRealtimeFrameSubscription {
+    try resource.frameDistributor.subscribe()
+  }
+
   /// Starts delivering input-device meter snapshots.
   public func start() throws {
     lock.lock()
@@ -300,6 +312,7 @@ protocol DeviceInputCaptureBackend: Sendable {
 
 protocol DeviceInputCaptureResource: AnyObject, Sendable {
   var format: DeviceInputCaptureFormat { get }
+  var frameDistributor: AudioRealtimeFrameDistributor { get }
   var frameBuffer: AudioRealtimeFrameBuffer { get }
 
   func start() throws

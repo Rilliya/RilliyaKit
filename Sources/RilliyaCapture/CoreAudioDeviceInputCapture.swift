@@ -55,9 +55,11 @@ private final class CoreAudioDeviceInputCaptureResource:
   DeviceInputCaptureResource, @unchecked Sendable
 {
   let format: DeviceInputCaptureFormat
+  let frameDistributor: AudioRealtimeFrameDistributor
   let frameBuffer: AudioRealtimeFrameBuffer
 
   private let lock = NSLock()
+  private let compatibilitySubscription: AudioRealtimeFrameSubscription
   private let meterBridge: RealtimeMeterBridge?
   private let failureBridge: DeviceInputFailureBridge
   private let renderStorage: DeviceInputRenderStorage
@@ -138,7 +140,11 @@ private final class CoreAudioDeviceInputCaptureResource:
       sampleRate: captureFormat.sampleRate,
       channelCount: captureFormat.channelIDs.count
     )
-    let frameBuffer = try AudioRealtimeFrameBuffer(format: processingFormat)
+    let frameDistributor = try AudioRealtimeFrameDistributor(
+      format: processingFormat,
+      maximumSubscriberCount: configuration.maximumAdditionalFrameSubscriberCount + 1
+    )
+    let compatibilitySubscription = try frameDistributor.subscribe()
     let storage = DeviceInputRenderStorage(
       channelCount: channelIDs.count,
       maximumFrames: Int(maximumFrames)
@@ -163,7 +169,9 @@ private final class CoreAudioDeviceInputCaptureResource:
     let failureBridge = DeviceInputFailureBridge(handler: failureHandler)
 
     format = captureFormat
-    self.frameBuffer = frameBuffer
+    self.frameDistributor = frameDistributor
+    frameBuffer = compatibilitySubscription.frameBuffer
+    self.compatibilitySubscription = compatibilitySubscription
     renderStorage = storage
     self.meterBridge = meterBridge
     self.failureBridge = failureBridge
@@ -270,7 +278,7 @@ private final class CoreAudioDeviceInputCaptureResource:
       failureBridge.report(status: status)
       return status
     }
-    frameBuffer.write(UnsafePointer(buffers))
+    frameDistributor.write(UnsafePointer(buffers))
     meterBridge?.consume(UnsafePointer(buffers))
     return noErr
   }

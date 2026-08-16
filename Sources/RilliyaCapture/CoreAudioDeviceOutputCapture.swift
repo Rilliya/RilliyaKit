@@ -29,9 +29,11 @@ private final class CoreAudioDeviceOutputCaptureResource:
   DeviceOutputCaptureResource, @unchecked Sendable
 {
   let format: DeviceOutputCaptureFormat
+  let frameDistributor: AudioRealtimeFrameDistributor
   let frameBuffer: AudioRealtimeFrameBuffer
 
   private let lock = NSLock()
+  private let compatibilitySubscription: AudioRealtimeFrameSubscription
   private let ioQueue: DispatchQueue
   private let meterBridge: RealtimeMeterBridge?
   private var tapID: AudioObjectID
@@ -121,9 +123,15 @@ private final class CoreAudioDeviceOutputCaptureResource:
         sampleRate: format.sampleRate,
         channelCount: format.channelIDs.count
       )
-      let frameBuffer = try AudioRealtimeFrameBuffer(format: processingFormat)
+      let frameDistributor = try AudioRealtimeFrameDistributor(
+        format: processingFormat,
+        maximumSubscriberCount: configuration.maximumAdditionalFrameSubscriberCount + 1
+      )
+      let compatibilitySubscription = try frameDistributor.subscribe()
       self.format = format
-      self.frameBuffer = frameBuffer
+      self.frameDistributor = frameDistributor
+      frameBuffer = compatibilitySubscription.frameBuffer
+      self.compatibilitySubscription = compatibilitySubscription
       tapID = newTapID
       aggregateID = newAggregateID
       ioQueue = DispatchQueue(
@@ -170,7 +178,7 @@ private final class CoreAudioDeviceOutputCaptureResource:
       guard !isRunning else { return }
 
       let meterBridge = meterBridge
-      let frameBuffer = frameBuffer
+      let frameDistributor = frameDistributor
       var newIOProcedureID: AudioDeviceIOProcID?
       try CoreAudioDeviceOutputTapSupport.check(
         AudioDeviceCreateIOProcIDWithBlock(
@@ -178,7 +186,7 @@ private final class CoreAudioDeviceOutputCaptureResource:
           aggregateID,
           ioQueue
         ) { _, input, _, _, _ in
-          frameBuffer.write(input)
+          frameDistributor.write(input)
           meterBridge?.consume(input)
         },
         operation: .createIOProcedure

@@ -82,7 +82,7 @@ struct DeviceOutputCaptureTests {
     #expect(capture.format.deviceID == resolvedID)
     #expect(capture.format.streamIndex.rawValue == 0)
     #expect(capture.format.sampleRate == 48_000)
-    #expect(capture.frameBuffer.format.channelCount == 2)
+    #expect(try capture.subscribeToFrames().format.channelCount == 2)
     for (index, channelID) in capture.format.channelIDs.enumerated() {
       #expect(channelID.ownerID == .source(.deviceOutput(resolvedID)))
       #expect(channelID.index.rawValue == index)
@@ -266,9 +266,11 @@ private final class StubDeviceOutputCaptureResource:
   DeviceOutputCaptureResource, @unchecked Sendable
 {
   let format: DeviceOutputCaptureFormat
+  let frameDistributor: AudioRealtimeFrameDistributor
   let frameBuffer: AudioRealtimeFrameBuffer
 
   private let lock = NSLock()
+  private let compatibilitySubscription: AudioRealtimeFrameSubscription
   private let startError: DeviceOutputCaptureError?
   private let stopError: DeviceOutputCaptureError?
   private var storedStartCallCount = 0
@@ -280,12 +282,17 @@ private final class StubDeviceOutputCaptureResource:
     stopError: DeviceOutputCaptureError? = nil
   ) throws {
     self.format = format
-    frameBuffer = try AudioRealtimeFrameBuffer(
+    let frameDistributor = try AudioRealtimeFrameDistributor(
       format: try AudioProcessingFormat(
         sampleRate: format.sampleRate,
         channelCount: format.channelIDs.count
-      )
+      ),
+      maximumSubscriberCount: 2
     )
+    let compatibilitySubscription = try frameDistributor.subscribe()
+    self.frameDistributor = frameDistributor
+    frameBuffer = compatibilitySubscription.frameBuffer
+    self.compatibilitySubscription = compatibilitySubscription
     self.startError = startError
     self.stopError = stopError
   }

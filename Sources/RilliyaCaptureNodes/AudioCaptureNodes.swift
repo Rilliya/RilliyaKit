@@ -63,7 +63,10 @@ public struct ApplicationAudioInput: AudioGraphExecutableNode {
     let capture = try await Task.detached(priority: .userInitiated) {
       try ProcessOutputCapture(
         processID: processID,
-        configuration: AudioMeterCaptureConfiguration(publishesMeterSnapshots: false),
+        configuration: AudioCaptureConfiguration(
+          publishesMeterSnapshots: false,
+          maximumAdditionalFrameSubscriberCount: 1
+        ),
         muteBehavior: muteBehavior,
         snapshotHandler: { _ in }
       )
@@ -136,7 +139,10 @@ public struct DeviceAudioInput: AudioGraphExecutableNode {
     let capture = try await Task.detached(priority: .userInitiated) {
       try DeviceInputCapture(
         deviceID: deviceID,
-        configuration: AudioMeterCaptureConfiguration(publishesMeterSnapshots: false),
+        configuration: AudioCaptureConfiguration(
+          publishesMeterSnapshots: false,
+          maximumAdditionalFrameSubscriberCount: 1
+        ),
         snapshotHandler: { _ in },
         failureHandler: failureHandler
       )
@@ -221,7 +227,10 @@ public struct OutputDeviceAudioInput: AudioGraphExecutableNode {
       try DeviceOutputCapture(
         target: target,
         processExclusion: processExclusion,
-        configuration: AudioMeterCaptureConfiguration(publishesMeterSnapshots: false),
+        configuration: AudioCaptureConfiguration(
+          publishesMeterSnapshots: false,
+          maximumAdditionalFrameSubscriberCount: 1
+        ),
         snapshotHandler: { _ in }
       )
     }.value
@@ -234,7 +243,7 @@ public struct OutputDeviceAudioInput: AudioGraphExecutableNode {
 }
 
 protocol AudioGraphCaptureSession: AnyObject, Sendable {
-  var frameBuffer: AudioRealtimeFrameBuffer { get }
+  func subscribeToFrames() throws -> AudioRealtimeFrameSubscription
 
   func start() throws
 
@@ -255,7 +264,7 @@ final class PreparedCapturedAudioSourceNode: PreparedAudioGraphNode, @unchecked 
   let timing = AudioNodeTiming.transparent
 
   private let session: any AudioGraphCaptureSession
-  private let source: PreparedAudioFrameBufferSource
+  private let source: PreparedAudioFrameSubscriptionSource
   private let outputPortID: AudioGraphPortID
 
   init(
@@ -265,11 +274,12 @@ final class PreparedCapturedAudioSourceNode: PreparedAudioGraphNode, @unchecked 
   ) throws {
     self.session = session
     self.outputPortID = outputPortID
-    source = try PreparedAudioFrameBufferSource(
-      frameBuffer: session.frameBuffer,
+    let subscription = try session.subscribeToFrames()
+    source = try PreparedAudioFrameSubscriptionSource(
+      subscription: subscription,
       maximumFrameCount: maximumFrameCount
     )
-    outputFormats = [outputPortID: session.frameBuffer.format]
+    outputFormats = [outputPortID: subscription.format]
   }
 
   func start() async throws {
