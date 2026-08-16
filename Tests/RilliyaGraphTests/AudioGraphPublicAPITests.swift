@@ -42,12 +42,25 @@ struct AudioGraphPublicAPITests {
     let output = try graph.add(TestStereoOutput())
     let connectionID = try graph.connect(source.output, to: output.input)
     let issue = AudioGraphConnectionIssue.incompatibleSignals(.incompatibleChannelCount)
+    let failure = AudioGraphConnectionFailure(
+      source: source.output,
+      target: output.input,
+      issue: issue
+    )
 
-    #expect(
-      throws: AudioGraphMutationError.nodeUpdateInvalidatedConnection(connectionID, issue)
-    ) {
+    let error = #expect(throws: AudioGraphMutationError.self) {
       try graph.update(TestConfigurableSource(channelCount: 1), at: source)
     }
+    guard let error,
+      case .nodeUpdateInvalidatedConnection(let failedConnectionID, let context) = error
+    else {
+      Issue.record("Expected an invalidated-connection error")
+      return
+    }
+    #expect(failedConnectionID == connectionID)
+    #expect(context == failure)
+    #expect(error.nodeIDs == [source.id, output.id])
+    #expect(error.connectionIDs == [connectionID])
     #expect(
       graph.node(id: source.id)?.value(as: TestConfigurableSource.self)?.channelCount == 2
     )
@@ -82,13 +95,27 @@ struct AudioGraphPublicAPITests {
     try graph.connect(first.output, to: target)
 
     let issue = AudioGraphConnectionIssue.targetAlreadyConnected(target)
+    let failure = AudioGraphConnectionFailure(
+      source: second.output,
+      target: target,
+      issue: issue
+    )
     #expect(
       graph.connectionDecision(from: second.output, to: target)
-        == .denied(issue)
+        == .denied(failure)
     )
-    #expect(throws: AudioGraphMutationError.connectionDenied(issue)) {
+    let error = #expect(throws: AudioGraphMutationError.self) {
       try graph.connect(second.output, to: target)
     }
+    guard let error, case .connectionDenied(let context) = error else {
+      Issue.record("Expected a denied-connection mutation")
+      return
+    }
+    #expect(context == failure)
+    #expect(context.errorDescription?.contains(second.id.rawValue.uuidString) == true)
+    #expect(context.errorDescription?.contains(output.id.rawValue.uuidString) == true)
+    #expect(context.recoverySuggestion?.contains("Disconnect") == true)
+    #expect(error.portAddresses == [second.output, target])
   }
 
   @Test("Reports every independent combinational cycle deterministically")
@@ -113,6 +140,7 @@ struct AudioGraphPublicAPITests {
     #expect(report.diagnostics.map(\.code) == [.cycle, .cycle])
     #expect(report.diagnostics[0].nodeIDs == Array(identifiers[0...1]))
     #expect(report.diagnostics[1].nodeIDs == Array(identifiers[2...3]))
+    #expect(report.diagnostics.flatMap(\.connectionIDs).count == 4)
   }
 
   @Test("An explicit state-breaking node makes feedback valid")
@@ -138,9 +166,16 @@ struct AudioGraphPublicAPITests {
     try graph.setConnection(id: firstConnection, isEnabled: false)
     _ = try graph.connect(second.output, to: target)
 
-    #expect(throws: AudioGraphMutationError.connectionDenied(.targetAlreadyConnected(target))) {
+    let error = #expect(throws: AudioGraphMutationError.self) {
       try graph.setConnection(id: firstConnection, isEnabled: true)
     }
+    guard let error, case .connectionDenied(let failure) = error else {
+      Issue.record("Expected re-enabling the connection to be denied")
+      return
+    }
+    #expect(failure.source == first.output)
+    #expect(failure.target == target)
+    #expect(failure.issue == .targetAlreadyConnected(target))
     let snapshot = try graph.snapshot()
     #expect(snapshot.connections.first?.id == firstConnection)
     #expect(snapshot.connections.first?.isEnabled == false)
@@ -160,6 +195,26 @@ struct AudioGraphPublicAPITests {
 
     #expect(graph.connection(id: disabledConnection)?.isEnabled == false)
     _ = try graph.snapshot()
+  }
+
+  @Test("Reports a stale connection mutation instead of silently ignoring it")
+  func reportsMissingConnectionMutation() throws {
+    var graph = AudioGraph()
+    let missingID = AudioGraphConnectionID()
+
+    let error = #expect(throws: AudioGraphMutationError.self) {
+      try graph.setConnection(id: missingID, isEnabled: false)
+    }
+
+    guard let error, case .missingConnection(let connectionID) = error else {
+      Issue.record("Expected a missing-connection mutation error")
+      return
+    }
+    #expect(connectionID == missingID)
+    #expect(error.connectionIDs == [missingID])
+    #expect(error.recoverySuggestion?.contains("stale mutation") == true)
+    let contextual: any AudioGraphContextualError = error
+    #expect(contextual.connectionIDs == [missingID])
   }
 
   @Test("Removes a node and its connections without changing surviving identities")

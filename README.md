@@ -27,7 +27,9 @@ nodes use the same `add` and `connect` operations; configuration stays in the no
 ordinary Swift defaults. Format negotiation, bounded buffers, realtime scheduling, and lifecycle
 ordering remain inside the engine. See [Getting started](Documentation/GettingStarted.md) for two
 short paths and [Creating graph nodes](Documentation/CreatingGraphNodes.md) when publishing a node
-package. Complete buildable examples live in [`Examples`](Examples).
+package. [Error handling](Documentation/ErrorHandling.md) shows how workflow UI can preview invalid
+connections and present exact node, connection, port, and custom-node error context. Complete
+buildable examples live in [`Examples`](Examples).
 
 The package is preparing its first public prerelease, `0.1.0-prealpha.1`, and
 currently requires macOS 14.2 or later and Swift 6. Public API may change before

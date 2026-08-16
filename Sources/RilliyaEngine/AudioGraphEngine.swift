@@ -41,6 +41,7 @@ public actor AudioGraphEngine {
   private let plan: PreparedAudioGraphPlan
   private var lifecycle = Lifecycle.ready
   private var driverTask: Task<AudioGraphEngineError?, Never>?
+  private var stateContinuations: [UUID: AsyncStream<AudioGraphEngineState>.Continuation] = [:]
 
   private init(
     configuration: AudioGraphEngineConfiguration,
@@ -52,6 +53,32 @@ public actor AudioGraphEngine {
 
   deinit {
     driverTask?.cancel()
+    for continuation in stateContinuations.values {
+      continuation.finish()
+    }
+  }
+
+  /// Returns lifecycle updates, including asynchronous render and cleanup failures.
+  ///
+  /// Every subscriber first receives the current state. Delivery retains only the newest pending
+  /// value per subscriber, so an unresponsive observer cannot grow engine memory. Streams finish
+  /// after the engine reaches its terminal `stopped` or `failed` state.
+  public func states() -> AsyncStream<AudioGraphEngineState> {
+    let pair = AsyncStream<AudioGraphEngineState>.makeStream(
+      bufferingPolicy: .bufferingNewest(1)
+    )
+    pair.continuation.yield(state)
+    if state.isTerminal {
+      pair.continuation.finish()
+      return pair.stream
+    }
+
+    let id = UUID()
+    stateContinuations[id] = pair.continuation
+    pair.continuation.onTermination = { [weak self] _ in
+      Task { await self?.removeStateContinuation(id: id) }
+    }
+    return pair.stream
   }
 
   /// Validates the graph, resolves active formats, and prepares every runtime off the render path.
@@ -82,12 +109,12 @@ public actor AudioGraphEngine {
       try await plan.start()
     } catch let error as AudioGraphEngineError {
       lifecycle = .failed(error)
-      state = .failed(error)
+      publishState(.failed(error))
       throw error
     }
     let generation = UUID()
     lifecycle = .running(generation)
-    state = .running
+    publishState(.running)
     guard configuration.driver == .background else { return }
 
     let task = Task.detached(priority: .high) { [plan] in
@@ -115,7 +142,7 @@ public actor AudioGraphEngine {
     if let failure = plan.render(frameCount: configuration.renderQuantumFrameCount) {
       try? await plan.stop()
       lifecycle = .failed(failure)
-      state = .failed(failure)
+      publishState(.failed(failure))
       throw failure
     }
   }
@@ -125,7 +152,7 @@ public actor AudioGraphEngine {
     switch lifecycle {
     case .ready:
       lifecycle = .stopped
-      state = .stopped
+      publishState(.stopped)
       return
     case .running:
       lifecycle = .stopping
@@ -142,10 +169,10 @@ public actor AudioGraphEngine {
     do {
       try await plan.stop()
       lifecycle = .stopped
-      state = .stopped
+      publishState(.stopped)
     } catch let error as AudioGraphEngineError {
       lifecycle = .failed(error)
-      state = .failed(error)
+      publishState(.failed(error))
       throw error
     }
   }
@@ -161,8 +188,24 @@ public actor AudioGraphEngine {
     if let failure {
       try? await plan.stop()
       lifecycle = .failed(failure)
-      state = .failed(failure)
+      publishState(.failed(failure))
     }
+  }
+
+  private func publishState(_ newState: AudioGraphEngineState) {
+    state = newState
+    for continuation in stateContinuations.values {
+      continuation.yield(newState)
+    }
+    guard newState.isTerminal else { return }
+    for continuation in stateContinuations.values {
+      continuation.finish()
+    }
+    stateContinuations.removeAll(keepingCapacity: false)
+  }
+
+  private func removeStateContinuation(id: UUID) {
+    stateContinuations.removeValue(forKey: id)
   }
 
   private nonisolated static func drive(
@@ -187,5 +230,16 @@ public actor AudioGraphEngine {
       }
     }
     return nil
+  }
+}
+
+extension AudioGraphEngineState {
+  fileprivate var isTerminal: Bool {
+    switch self {
+    case .stopped, .failed:
+      true
+    case .ready, .running:
+      false
+    }
   }
 }

@@ -21,6 +21,8 @@ version section with migration guidance.
   processor adapters, and asynchronous overlapping analysis-window sinks.
 - Ready-to-connect application-output and input-device graph source nodes that avoid unused meter
   work, plus a closure-backed terminal audio-window analyzer node.
+- Structured graph and engine failures with exact node, connection, and port context, preserved
+  custom-node errors, recovery suggestions, and bounded asynchronous engine-state observation.
 
 ### Changed
 
@@ -37,7 +39,14 @@ version section with migration guidance.
 
 ### Breaking Changes
 
-- Nothing yet.
+- Connection preview and mutation denial now carry `AudioGraphConnectionFailure`; access its
+  machine-readable reason through `.issue` and its attempted endpoints through `.source` and
+  `.target`.
+- Invalid third-party node descriptors are grouped under `.invalidNodeDefinition`, while errors
+  thrown by `makeDescriptor()` are wrapped by `.nodeDescriptorFailed` and remain available through
+  `underlyingError`.
+- `setConnection(id:isEnabled:)` now throws `.missingConnection` for stale identities instead of
+  returning `false`.
 
 ## 0.1.0-prealpha.1
 

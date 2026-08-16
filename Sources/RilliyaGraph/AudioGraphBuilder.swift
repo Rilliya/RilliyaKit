@@ -71,6 +71,24 @@ public enum AudioGraphConnectionIssue: Error, Equatable, LocalizedError, Sendabl
       return "The graph has reached its configured connection limit of \(limit)."
     }
   }
+
+  /// A practical next step suitable for developer tools and workflow UI.
+  public var recoverySuggestion: String? {
+    switch self {
+    case .missingSourceNode, .missingTargetNode, .missingSourcePort, .missingTargetPort:
+      "Refresh the workflow topology and reconnect using an address that still exists."
+    case .sourceIsNotOutput, .targetIsNotInput:
+      "Connect an output port to an input port."
+    case .incompatibleSignals:
+      "Insert an explicit converter or select ports with compatible signal types."
+    case .targetAlreadyConnected:
+      "Disconnect the existing source or use an input that explicitly supports mixing."
+    case .duplicateEndpoints:
+      "Reuse or update the existing connection instead of creating a duplicate."
+    case .connectionLimitReached:
+      "Remove unused connections or prepare the graph with a larger checked connection limit."
+    }
+  }
 }
 
 extension AudioGraphSignalIncompatibility {
@@ -92,31 +110,62 @@ extension AudioGraphSignalIncompatibility {
   }
 }
 
+/// Complete context for one denied graph connection.
+public struct AudioGraphConnectionFailure: AudioGraphContextualError, Equatable, LocalizedError,
+  Sendable
+{
+  /// The output address supplied by the caller.
+  public let source: AudioGraphPortAddress
+
+  /// The input address supplied by the caller.
+  public let target: AudioGraphPortAddress
+
+  /// The machine-readable reason the connection was denied.
+  public let issue: AudioGraphConnectionIssue
+
+  /// Creates a self-contained connection failure suitable for logs and workflow UI.
+  public init(
+    source: AudioGraphPortAddress,
+    target: AudioGraphPortAddress,
+    issue: AudioGraphConnectionIssue
+  ) {
+    self.source = source
+    self.target = target
+    self.issue = issue
+  }
+
+  /// A concise explanation that retains both attempted endpoints.
+  public var errorDescription: String? {
+    let reason = issue.errorDescription ?? "The connection is invalid."
+    return
+      "Cannot connect port '\(source.portID.rawValue)' on node \(source.nodeID.rawValue.uuidString) to port '\(target.portID.rawValue)' on node \(target.nodeID.rawValue.uuidString): \(reason)"
+  }
+
+  /// A practical next step derived from the machine-readable issue.
+  public var recoverySuggestion: String? { issue.recoverySuggestion }
+
+  /// The two node instances addressed by this attempted connection.
+  public var nodeIDs: [AudioGraphNodeID] {
+    source.nodeID == target.nodeID ? [source.nodeID] : [source.nodeID, target.nodeID]
+  }
+
+  /// The two attempted port addresses in source-to-target order.
+  public var portAddresses: [AudioGraphPortAddress] { [source, target] }
+}
+
 /// The result of previewing a connection against the current graph.
 public enum AudioGraphConnectionDecision: Equatable, Sendable {
   /// The connection is valid, optionally through one lossless implicit conversion.
   case allowed(conversion: AudioGraphImplicitConversion?)
 
   /// The connection is invalid for the reported reason.
-  case denied(AudioGraphConnectionIssue)
+  case denied(AudioGraphConnectionFailure)
 }
 
-/// A graph mutation that could not be applied safely.
-public enum AudioGraphMutationError: Error, Equatable, LocalizedError, Sendable {
-  /// A node instance already uses the supplied identity.
-  case duplicateNodeID(AudioGraphNodeID)
-
-  /// A connection instance already uses the supplied identity.
-  case duplicateConnectionID(AudioGraphConnectionID)
-
-  /// The requested node does not exist.
-  case missingNode(AudioGraphNodeID)
-
-  /// Configuration for a different node definition cannot replace an existing node.
-  case nodeTypeMismatch(expected: AudioGraphNodeTypeID, actual: AudioGraphNodeTypeID)
-
-  /// Updated node configuration made an existing connection invalid.
-  case nodeUpdateInvalidatedConnection(AudioGraphConnectionID, AudioGraphConnectionIssue)
+/// A malformed semantic definition supplied by one graph node value.
+public enum AudioGraphNodeDefinitionIssue: Error, Equatable, LocalizedError, Sendable {
+  /// The resolved descriptor contains more ports than the configured safety bound.
+  case portLimitExceeded(actual: Int, limit: Int)
 
   /// A node type supplied an empty stable identity.
   case emptyNodeTypeID
@@ -136,11 +185,131 @@ public enum AudioGraphMutationError: Error, Equatable, LocalizedError, Sendable 
   /// A namespaced category, structure, or field identity was empty.
   case emptySemanticID(AudioGraphPortID)
 
+  /// A concise explanation of the malformed definition.
+  public var errorDescription: String? {
+    switch self {
+    case .portLimitExceeded(let actual, let limit):
+      "The node defines \(actual) ports, exceeding the configured limit of \(limit)."
+    case .emptyNodeTypeID:
+      "Graph node type identities cannot be empty."
+    case .emptyPortID:
+      "Graph port identities cannot be empty."
+    case .duplicatePortID(let portID):
+      "The node defines port '\(portID.rawValue)' more than once."
+    case .invalidPortConnectionPolicy(let portID):
+      "Port '\(portID.rawValue)' has a connection policy that does not match its direction."
+    case .invalidAudioSignalConstraint(let portID):
+      "Port '\(portID.rawValue)' has an invalid audio signal constraint."
+    case .emptySemanticID(let portID):
+      "Port '\(portID.rawValue)' contains an empty semantic signal identity."
+    }
+  }
+
+  /// The malformed port when this issue refers to one.
+  public var portID: AudioGraphPortID? {
+    switch self {
+    case .duplicatePortID(let portID), .invalidPortConnectionPolicy(let portID),
+      .invalidAudioSignalConstraint(let portID), .emptySemanticID(let portID):
+      portID
+    case .portLimitExceeded, .emptyNodeTypeID, .emptyPortID:
+      nil
+    }
+  }
+}
+
+/// Node identity and type context around one malformed semantic definition.
+public struct AudioGraphNodeDefinitionFailure: Error, Equatable, LocalizedError, Sendable {
+  /// The node instance being inserted or updated.
+  public let nodeID: AudioGraphNodeID
+
+  /// The package-defined node type.
+  public let nodeTypeID: AudioGraphNodeTypeID
+
+  /// The machine-readable definition problem.
+  public let issue: AudioGraphNodeDefinitionIssue
+
+  /// Creates a contextual node-definition failure.
+  public init(
+    nodeID: AudioGraphNodeID,
+    nodeTypeID: AudioGraphNodeTypeID,
+    issue: AudioGraphNodeDefinitionIssue
+  ) {
+    self.nodeID = nodeID
+    self.nodeTypeID = nodeTypeID
+    self.issue = issue
+  }
+
+  /// A concise explanation that identifies the node package and instance.
+  public var errorDescription: String? {
+    "Node '\(nodeTypeID.rawValue)' (\(nodeID.rawValue.uuidString)) is invalid: \(issue.errorDescription ?? "invalid definition")"
+  }
+}
+
+/// Context around an error thrown while a node value resolves its descriptor.
+public struct AudioGraphNodeDescriptorFailure: Error, LocalizedError, @unchecked Sendable {
+  /// The node instance being inserted or updated.
+  public let nodeID: AudioGraphNodeID
+
+  /// The package-defined node type.
+  public let nodeTypeID: AudioGraphNodeTypeID
+
+  /// The original concrete error thrown by the node package.
+  public let underlyingError: any Error
+
+  /// Creates failure context without erasing the original error value.
+  public init(
+    nodeID: AudioGraphNodeID,
+    nodeTypeID: AudioGraphNodeTypeID,
+    underlyingError: any Error
+  ) {
+    self.nodeID = nodeID
+    self.nodeTypeID = nodeTypeID
+    self.underlyingError = underlyingError
+  }
+
+  /// A concise explanation that identifies the failing node value.
+  public var errorDescription: String? {
+    "Node '\(nodeTypeID.rawValue)' (\(nodeID.rawValue.uuidString)) could not resolve its descriptor: \(underlyingError.localizedDescription)"
+  }
+}
+
+/// A graph mutation that could not be applied safely.
+public enum AudioGraphMutationError: AudioGraphContextualError, LocalizedError,
+  @unchecked Sendable
+{
+  /// A node instance already uses the supplied identity.
+  case duplicateNodeID(AudioGraphNodeID)
+
+  /// A connection instance already uses the supplied identity.
+  case duplicateConnectionID(AudioGraphConnectionID)
+
+  /// The requested node does not exist.
+  case missingNode(AudioGraphNodeID)
+
+  /// The requested connection does not exist.
+  case missingConnection(AudioGraphConnectionID)
+
+  /// Configuration for a different node definition cannot replace an existing node.
+  case nodeTypeMismatch(
+    nodeID: AudioGraphNodeID,
+    expected: AudioGraphNodeTypeID,
+    actual: AudioGraphNodeTypeID
+  )
+
+  /// Updated node configuration made an existing connection invalid.
+  case nodeUpdateInvalidatedConnection(AudioGraphConnectionID, AudioGraphConnectionFailure)
+
+  /// A node package threw while resolving its configured semantic descriptor.
+  case nodeDescriptorFailed(AudioGraphNodeDescriptorFailure)
+
+  /// A node's resolved semantic descriptor is malformed.
+  case invalidNodeDefinition(AudioGraphNodeDefinitionFailure)
+
   /// A configured construction bound was exceeded.
   case resourceLimitExceeded(AudioGraphResource, limit: Int)
 
   /// A requested connection was denied by the shared evaluator.
-  case connectionDenied(AudioGraphConnectionIssue)
+  case connectionDenied(AudioGraphConnectionFailure)
 
   /// The graph contains validation errors and cannot become a snapshot.
   case validationFailed(AudioGraphValidationReport)
@@ -148,37 +317,111 @@ public enum AudioGraphMutationError: Error, Equatable, LocalizedError, Sendable 
   /// A localized explanation of the failed mutation.
   public var errorDescription: String? {
     switch self {
-    case .duplicateNodeID:
-      return "The graph already contains a node with this identity."
-    case .duplicateConnectionID:
-      return "The graph already contains a connection with this identity."
-    case .missingNode:
-      return "The requested graph node does not exist."
-    case .nodeTypeMismatch(let expected, let actual):
+    case .duplicateNodeID(let nodeID):
+      return "The graph already contains node \(nodeID.rawValue.uuidString)."
+    case .duplicateConnectionID(let connectionID):
+      return "The graph already contains connection \(connectionID.rawValue.uuidString)."
+    case .missingNode(let nodeID):
+      return "Graph node \(nodeID.rawValue.uuidString) does not exist."
+    case .missingConnection(let connectionID):
+      return "Graph connection \(connectionID.rawValue.uuidString) does not exist."
+    case .nodeTypeMismatch(let nodeID, let expected, let actual):
       return
-        "Node configuration for '\(actual.rawValue)' cannot replace a node of type '\(expected.rawValue)'."
-    case .nodeUpdateInvalidatedConnection(_, let issue):
-      return issue.errorDescription
-    case .emptyNodeTypeID:
-      return "Graph node type identities cannot be empty."
-    case .emptyPortID:
-      return "Graph port identities cannot be empty."
-    case .duplicatePortID(let portID):
-      return "The node defines port '\(portID.rawValue)' more than once."
-    case .invalidPortConnectionPolicy(let portID):
-      return "Port '\(portID.rawValue)' has a connection policy that does not match its direction."
-    case .invalidAudioSignalConstraint(let portID):
-      return "Port '\(portID.rawValue)' has an invalid audio signal constraint."
-    case .emptySemanticID(let portID):
-      return "Port '\(portID.rawValue)' contains an empty semantic signal identity."
+        "Node \(nodeID.rawValue.uuidString) has type '\(expected.rawValue)' and cannot accept configuration for '\(actual.rawValue)'."
+    case .nodeUpdateInvalidatedConnection(let connectionID, let failure):
+      return
+        "Updating the node invalidated connection \(connectionID.rawValue.uuidString): \(failure.errorDescription ?? "invalid connection")"
+    case .nodeDescriptorFailed(let failure):
+      return failure.errorDescription
+    case .invalidNodeDefinition(let failure):
+      return failure.errorDescription
     case .resourceLimitExceeded(let resource, let limit):
       return "The graph exceeds the configured \(resource.rawValue) limit of \(limit)."
-    case .connectionDenied(let issue):
-      return issue.errorDescription
+    case .connectionDenied(let failure):
+      return failure.errorDescription
     case .validationFailed(let report):
       return report.diagnostics.first?.message
         ?? "The graph contains validation errors and cannot be prepared."
     }
+  }
+
+  /// A practical next step suitable for developer tools and workflow UI.
+  public var recoverySuggestion: String? {
+    switch self {
+    case .duplicateNodeID:
+      "Generate a new node identity or update the existing node."
+    case .duplicateConnectionID:
+      "Generate a new connection identity or update the existing connection."
+    case .missingNode, .missingConnection:
+      "Refresh the workflow topology before applying this stale mutation."
+    case .nodeTypeMismatch:
+      "Remove and replace the node when changing its package-defined type."
+    case .nodeUpdateInvalidatedConnection(_, let failure), .connectionDenied(let failure):
+      failure.recoverySuggestion
+    case .nodeDescriptorFailed:
+      "Inspect underlyingError for the node package's typed recovery information."
+    case .invalidNodeDefinition:
+      "Correct the node package's descriptor before inserting this node."
+    case .resourceLimitExceeded:
+      "Reduce the graph or raise the checked construction limit explicitly."
+    case .validationFailed:
+      "Use the report's node and connection identities to correct every diagnostic."
+    }
+  }
+
+  /// Node instances directly implicated by this failure.
+  public var nodeIDs: [AudioGraphNodeID] {
+    switch self {
+    case .duplicateNodeID(let nodeID), .missingNode(let nodeID):
+      [nodeID]
+    case .nodeTypeMismatch(let nodeID, _, _):
+      [nodeID]
+    case .nodeUpdateInvalidatedConnection(_, let failure), .connectionDenied(let failure):
+      failure.nodeIDs
+    case .nodeDescriptorFailed(let failure):
+      [failure.nodeID]
+    case .invalidNodeDefinition(let failure):
+      [failure.nodeID]
+    case .validationFailed(let report):
+      Array(Set(report.diagnostics.flatMap(\.nodeIDs))).sorted(by: audioGraphNodeIDLessThan)
+    case .duplicateConnectionID, .missingConnection, .resourceLimitExceeded:
+      []
+    }
+  }
+
+  /// Connection instances directly implicated by this failure.
+  public var connectionIDs: [AudioGraphConnectionID] {
+    switch self {
+    case .duplicateConnectionID(let connectionID), .missingConnection(let connectionID),
+      .nodeUpdateInvalidatedConnection(let connectionID, _):
+      [connectionID]
+    case .validationFailed(let report):
+      Array(Set(report.diagnostics.flatMap(\.connectionIDs))).sorted(
+        by: audioGraphConnectionIDLessThan
+      )
+    default:
+      []
+    }
+  }
+
+  /// Port addresses directly implicated by this failure.
+  public var portAddresses: [AudioGraphPortAddress] {
+    switch self {
+    case .nodeUpdateInvalidatedConnection(_, let failure), .connectionDenied(let failure):
+      failure.portAddresses
+    case .invalidNodeDefinition(let failure):
+      failure.issue.portID.map {
+        [AudioGraphPortAddress(nodeID: failure.nodeID, portID: $0)]
+      } ?? []
+    default:
+      []
+    }
+  }
+
+  /// The original concrete node-package error when descriptor resolution failed.
+  public var underlyingError: (any Error)? {
+    guard case .nodeDescriptorFailed(let failure) = self else { return nil }
+    return failure.underlyingError
   }
 }
 
@@ -244,10 +487,27 @@ public struct AudioGraph: Sendable {
       )
     }
     guard !Node.typeID.rawValue.isEmpty else {
-      throw AudioGraphMutationError.emptyNodeTypeID
+      throw AudioGraphMutationError.invalidNodeDefinition(
+        AudioGraphNodeDefinitionFailure(
+          nodeID: id,
+          nodeTypeID: Node.typeID,
+          issue: .emptyNodeTypeID
+        )
+      )
     }
-    let descriptor = try node.makeDescriptor()
-    try validate(descriptor: descriptor)
+    let descriptor: AudioGraphNodeDescriptor
+    do {
+      descriptor = try node.makeDescriptor()
+    } catch {
+      throw AudioGraphMutationError.nodeDescriptorFailed(
+        AudioGraphNodeDescriptorFailure(
+          nodeID: id,
+          nodeTypeID: Node.typeID,
+          underlyingError: error
+        )
+      )
+    }
+    try validate(descriptor: descriptor, nodeID: id, nodeTypeID: Node.typeID)
 
     let instance = AudioGraphNodeInstance(
       id: id,
@@ -282,12 +542,28 @@ public struct AudioGraph: Sendable {
     let existingNode = nodeStorage[index]
     guard existingNode.typeID == Node.typeID else {
       throw AudioGraphMutationError.nodeTypeMismatch(
+        nodeID: nodeID,
         expected: existingNode.typeID,
         actual: Node.typeID
       )
     }
-    let descriptor = try node.makeDescriptor()
-    try validate(descriptor: descriptor)
+    let descriptor: AudioGraphNodeDescriptor
+    do {
+      descriptor = try node.makeDescriptor()
+    } catch {
+      throw AudioGraphMutationError.nodeDescriptorFailed(
+        AudioGraphNodeDescriptorFailure(
+          nodeID: nodeID,
+          nodeTypeID: Node.typeID,
+          underlyingError: error
+        )
+      )
+    }
+    try validate(
+      descriptor: descriptor,
+      nodeID: nodeID,
+      nodeTypeID: Node.typeID
+    )
 
     var candidate = self
     candidate.nodeStorage[index] = AudioGraphNodeInstance(
@@ -315,8 +591,8 @@ public struct AudioGraph: Sendable {
           implicitConversion: conversion,
           isEnabled: connection.isEnabled
         )
-      case .denied(let issue):
-        throw AudioGraphMutationError.nodeUpdateInvalidatedConnection(connection.id, issue)
+      case .denied(let failure):
+        throw AudioGraphMutationError.nodeUpdateInvalidatedConnection(connection.id, failure)
       }
     }
     let report = candidate.validate()
@@ -350,30 +626,40 @@ public struct AudioGraph: Sendable {
     excluding excludedConnectionID: AudioGraphConnectionID?,
     wouldBeEnabled: Bool = true
   ) -> AudioGraphConnectionDecision {
+    func denied(_ issue: AudioGraphConnectionIssue) -> AudioGraphConnectionDecision {
+      .denied(
+        AudioGraphConnectionFailure(
+          source: source,
+          target: target,
+          issue: issue
+        )
+      )
+    }
+
     guard let sourceNode = node(id: source.nodeID) else {
-      return .denied(.missingSourceNode(source.nodeID))
+      return denied(.missingSourceNode(source.nodeID))
     }
     guard let targetNode = node(id: target.nodeID) else {
-      return .denied(.missingTargetNode(target.nodeID))
+      return denied(.missingTargetNode(target.nodeID))
     }
     guard let sourcePort = sourceNode.port(source.portID) else {
-      return .denied(.missingSourcePort(source))
+      return denied(.missingSourcePort(source))
     }
     guard let targetPort = targetNode.port(target.portID) else {
-      return .denied(.missingTargetPort(target))
+      return denied(.missingTargetPort(target))
     }
     guard sourcePort.direction == .output else {
-      return .denied(.sourceIsNotOutput(source))
+      return denied(.sourceIsNotOutput(source))
     }
     guard targetPort.direction == .input else {
-      return .denied(.targetIsNotInput(target))
+      return denied(.targetIsNotInput(target))
     }
     let endpoints = AudioGraphConnectionEndpoints(source: source, target: target)
     guard
       connectionIDsByEndpoint[endpoints] == nil
         || connectionIDsByEndpoint[endpoints] == excludedConnectionID
     else {
-      return .denied(.duplicateEndpoints)
+      return denied(.duplicateEndpoints)
     }
     var enabledIncomingCount = enabledIncomingConnectionCounts[target, default: 0]
     if let excludedConnectionID,
@@ -384,13 +670,13 @@ public struct AudioGraph: Sendable {
       enabledIncomingCount -= 1
     }
     if wouldBeEnabled, targetPort.connectionPolicy == .singleInput, enabledIncomingCount > 0 {
-      return .denied(.targetAlreadyConnected(target))
+      return denied(.targetAlreadyConnected(target))
     }
     guard
       excludedConnectionID != nil
         || connectionStorage.count < configuration.limits.maximumConnectionCount
     else {
-      return .denied(
+      return denied(
         .connectionLimitReached(configuration.limits.maximumConnectionCount)
       )
     }
@@ -398,7 +684,7 @@ public struct AudioGraph: Sendable {
     case .compatible(let conversion):
       return .allowed(conversion: conversion)
     case .incompatible(let issue):
-      return .denied(.incompatibleSignals(issue))
+      return denied(.incompatibleSignals(issue))
     }
   }
 
@@ -416,8 +702,8 @@ public struct AudioGraph: Sendable {
     switch connectionDecision(from: source, to: target) {
     case .allowed(let selectedConversion):
       conversion = selectedConversion
-    case .denied(let issue):
-      throw AudioGraphMutationError.connectionDenied(issue)
+    case .denied(let failure):
+      throw AudioGraphMutationError.connectionDenied(failure)
     }
     let connection = AudioGraphConnection(
       id: id,
@@ -445,12 +731,16 @@ public struct AudioGraph: Sendable {
   }
 
   /// Enables or disables one connection without changing its stable identity.
-  @discardableResult
+  ///
+  /// Unlike idempotent removal, changing a missing connection is reported as a mutation error so
+  /// a workflow editor cannot silently apply an update to stale state.
   public mutating func setConnection(
     id: AudioGraphConnectionID,
     isEnabled: Bool
-  ) throws -> Bool {
-    guard let index = connectionIndices[id] else { return false }
+  ) throws {
+    guard let index = connectionIndices[id] else {
+      throw AudioGraphMutationError.missingConnection(id)
+    }
     let connection = connectionStorage[index]
     if isEnabled, !connection.isEnabled {
       switch connectionDecision(
@@ -466,8 +756,8 @@ public struct AudioGraph: Sendable {
           implicitConversion: conversion,
           isEnabled: true
         )
-      case .denied(let issue):
-        throw AudioGraphMutationError.connectionDenied(issue)
+      case .denied(let failure):
+        throw AudioGraphMutationError.connectionDenied(failure)
       }
     } else {
       connectionStorage[index] = AudioGraphConnection(
@@ -479,7 +769,6 @@ public struct AudioGraph: Sendable {
       )
     }
     rebuildConnectionIndices()
-    return true
   }
 
   /// Validates the complete graph and returns bounded, deterministic diagnostics.
@@ -504,55 +793,112 @@ public struct AudioGraph: Sendable {
     )
   }
 
-  private func validate(descriptor: AudioGraphNodeDescriptor) throws {
+  private func validate(
+    descriptor: AudioGraphNodeDescriptor,
+    nodeID: AudioGraphNodeID,
+    nodeTypeID: AudioGraphNodeTypeID
+  ) throws {
     guard descriptor.ports.count <= configuration.limits.maximumPortCountPerNode else {
-      throw AudioGraphMutationError.resourceLimitExceeded(
-        .portsPerNode,
-        limit: configuration.limits.maximumPortCountPerNode
+      throw invalidDefinition(
+        nodeID: nodeID,
+        nodeTypeID: nodeTypeID,
+        issue: .portLimitExceeded(
+          actual: descriptor.ports.count,
+          limit: configuration.limits.maximumPortCountPerNode
+        )
       )
     }
     var portIDs = Set<AudioGraphPortID>()
     portIDs.reserveCapacity(descriptor.ports.count)
     for port in descriptor.ports {
       guard !port.id.rawValue.isEmpty else {
-        throw AudioGraphMutationError.emptyPortID
+        throw invalidDefinition(
+          nodeID: nodeID,
+          nodeTypeID: nodeTypeID,
+          issue: .emptyPortID
+        )
       }
       guard portIDs.insert(port.id).inserted else {
-        throw AudioGraphMutationError.duplicatePortID(port.id)
+        throw invalidDefinition(
+          nodeID: nodeID,
+          nodeTypeID: nodeTypeID,
+          issue: .duplicatePortID(port.id)
+        )
       }
       switch (port.direction, port.connectionPolicy) {
       case (.output, .fanOut), (.input, .singleInput), (.input, .mixingInput):
         break
       default:
-        throw AudioGraphMutationError.invalidPortConnectionPolicy(port.id)
+        throw invalidDefinition(
+          nodeID: nodeID,
+          nodeTypeID: nodeTypeID,
+          issue: .invalidPortConnectionPolicy(port.id)
+        )
       }
-      try validate(signalType: port.signalType, portID: port.id)
+      try validate(
+        signalType: port.signalType,
+        portID: port.id,
+        nodeID: nodeID,
+        nodeTypeID: nodeTypeID
+      )
     }
   }
 
   private func validate(
     signalType: AudioGraphSignalType,
-    portID: AudioGraphPortID
+    portID: AudioGraphPortID,
+    nodeID: AudioGraphNodeID,
+    nodeTypeID: AudioGraphNodeTypeID
   ) throws {
     switch signalType {
     case .audio(let audio):
       if case .fixed(let count) = audio.channelCount, count <= 0 {
-        throw AudioGraphMutationError.invalidAudioSignalConstraint(portID)
+        throw invalidDefinition(
+          nodeID: nodeID,
+          nodeTypeID: nodeTypeID,
+          issue: .invalidAudioSignalConstraint(portID)
+        )
       }
       if case .fixed(let rate) = audio.sampleRate, !rate.isFinite || rate <= 0 {
-        throw AudioGraphMutationError.invalidAudioSignalConstraint(portID)
+        throw invalidDefinition(
+          nodeID: nodeID,
+          nodeTypeID: nodeTypeID,
+          issue: .invalidAudioSignalConstraint(portID)
+        )
       }
     case .category(let domain):
       if let domain, domain.rawValue.isEmpty {
-        throw AudioGraphMutationError.emptySemanticID(portID)
+        throw invalidDefinition(
+          nodeID: nodeID,
+          nodeTypeID: nodeTypeID,
+          issue: .emptySemanticID(portID)
+        )
       }
     case .structure(let structure):
       if structure.rawValue.isEmpty {
-        throw AudioGraphMutationError.emptySemanticID(portID)
+        throw invalidDefinition(
+          nodeID: nodeID,
+          nodeTypeID: nodeTypeID,
+          issue: .emptySemanticID(portID)
+        )
       }
     case .scalar:
       break
     }
+  }
+
+  private func invalidDefinition(
+    nodeID: AudioGraphNodeID,
+    nodeTypeID: AudioGraphNodeTypeID,
+    issue: AudioGraphNodeDefinitionIssue
+  ) -> AudioGraphMutationError {
+    .invalidNodeDefinition(
+      AudioGraphNodeDefinitionFailure(
+        nodeID: nodeID,
+        nodeTypeID: nodeTypeID,
+        issue: issue
+      )
+    )
   }
 
   private mutating func rebuildIndices() {

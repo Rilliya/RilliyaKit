@@ -124,6 +124,56 @@ struct AudioGraphEngineTests {
     }
   }
 
+  @Test("Unsupported signal execution reports its exact connection and endpoints")
+  func unsupportedSignalRetainsConnectionContext() async throws {
+    var graph = AudioGraph()
+    let source = try graph.add(UnsupportedControlNode(role: .source))
+    let sink = try graph.add(UnsupportedControlNode(role: .sink))
+    let connectionID = try graph.connect(source.output, to: sink.input)
+
+    do {
+      _ = try await AudioGraphEngine.prepare(graph)
+      Issue.record("Expected control execution to be rejected")
+    } catch let error as AudioGraphEngineError {
+      guard case .unsupportedSignalConnection(let failedID, let from, let to) = error else {
+        Issue.record("Received unexpected error: \(error)")
+        return
+      }
+      #expect(failedID == connectionID)
+      #expect(from == source.output)
+      #expect(to == sink.input)
+      #expect(error.nodeIDs == [source.id, sink.id])
+      #expect(error.connectionIDs == [connectionID])
+      #expect(error.portAddresses == [source.output, sink.input])
+      #expect(error.recoverySuggestion?.contains("semantic-only") == true)
+      let contextual: any AudioGraphContextualError = error
+      #expect(contextual.connectionIDs == [connectionID])
+    }
+  }
+
+  @Test("Unsupported feedback execution reports involved topology")
+  func feedbackRetainsTopologyContext() async throws {
+    var graph = AudioGraph()
+    let relay = try graph.add(ExecutableRelayNode(breaksCycle: false, isSink: false))
+    let stateBreaker = try graph.add(ExecutableRelayNode(breaksCycle: true, isSink: true))
+    let firstConnection = try graph.connect(relay.output, to: stateBreaker.input)
+    let secondConnection = try graph.connect(stateBreaker.output, to: relay.input)
+
+    do {
+      _ = try await AudioGraphEngine.prepare(graph)
+      Issue.record("Expected feedback execution to be rejected")
+    } catch let error as AudioGraphEngineError {
+      guard case .unsupportedFeedbackCycle(let nodeIDs, let connectionIDs) = error else {
+        Issue.record("Received unexpected error: \(error)")
+        return
+      }
+      #expect(Set(nodeIDs) == Set([relay.id, stateBreaker.id]))
+      #expect(Set(connectionIDs) == Set([firstConnection, secondConnection]))
+      #expect(error.nodeIDs == nodeIDs)
+      #expect(error.connectionIDs == connectionIDs)
+    }
+  }
+
   @Test("Does not activate a source with no downstream sink")
   func rejectsGraphWithoutSink() async throws {
     var graph = AudioGraph()
@@ -175,10 +225,11 @@ struct AudioGraphEngineTests {
       _ = try await AudioGraphEngine.prepare(graph, configuration: configuration)
       Issue.record("Expected the scratch-memory bound to reject preparation")
     } catch let error as AudioGraphEngineError {
-      guard case .scratchMemoryLimitExceeded(let limit) = error else {
+      guard case .scratchMemoryLimitExceeded(let requiredByteCount, let limit) = error else {
         Issue.record("Received unexpected error: \(error)")
         return
       }
+      #expect(requiredByteCount == 2_048)
       #expect(limit == 1_024)
     }
   }
@@ -203,6 +254,7 @@ struct AudioGraphEngineTests {
       #expect(failure.nodeTypeID == FailingStartNode.typeID)
       #expect(failure.stage == .start)
       #expect(failure.underlyingError as? TestRuntimeError == .start)
+      #expect(error.underlyingError as? TestRuntimeError == .start)
     }
     guard case .failed(let failure) = await engine.state,
       case .nodeFailure(let context) = failure
@@ -211,6 +263,32 @@ struct AudioGraphEngineTests {
       return
     }
     #expect(context.nodeID == node.id)
+  }
+
+  @Test("Publishes asynchronous render failures with structured node context")
+  func publishesAsynchronousRenderFailure() async throws {
+    var graph = AudioGraph()
+    let node = try graph.add(FailingRenderNode())
+    let engine = try await AudioGraphEngine.prepare(graph)
+    let updates = await engine.states()
+    let failureTask = Task<AudioGraphEngineError?, Never> {
+      for await state in updates {
+        guard case .failed(let error) = state else { continue }
+        return error
+      }
+      return nil
+    }
+
+    try await engine.start()
+    let failure = await failureTask.value
+
+    guard let failure, case .nodeRenderFailed(let nodeID, let nodeTypeID, _) = failure else {
+      Issue.record("Expected a published render failure")
+      return
+    }
+    #expect(nodeID == node.id)
+    #expect(nodeTypeID == FailingRenderNode.typeID)
+    #expect(failure.nodeIDs == [node.id])
   }
 
   private func manualConfiguration() throws -> AudioGraphEngineConfiguration {
@@ -563,6 +641,72 @@ private struct SemanticOnlySink: AudioGraphNode {
   }
 }
 
+private struct UnsupportedControlNode: AudioGraphExecutableNode {
+  enum Role: Sendable {
+    case source
+    case sink
+  }
+
+  struct Ports: AudioGraphNodePorts {
+    let input = AudioGraphPortID(rawValue: "input")
+    let output = AudioGraphPortID(rawValue: "output")
+  }
+
+  static let typeID = AudioGraphNodeTypeID(rawValue: "test.engine.unsupported-control")
+  static let ports = Ports()
+  let role: Role
+
+  func makeDescriptor() -> AudioGraphNodeDescriptor {
+    switch role {
+    case .source:
+      AudioGraphNodeDescriptor(
+        ports: [.output(Self.ports.output, signal: .scalar(.integer))]
+      )
+    case .sink:
+      AudioGraphNodeDescriptor(
+        ports: [.input(Self.ports.input, signal: .scalar(.integer))],
+        activation: .sink
+      )
+    }
+  }
+
+  func prepare(
+    context: AudioGraphNodePreparationContext
+  ) async throws -> any PreparedAudioGraphNode {
+    throw TestRuntimeError.prepare
+  }
+}
+
+private struct ExecutableRelayNode: AudioGraphExecutableNode {
+  struct Ports: AudioGraphNodePorts {
+    let input = AudioGraphPortID(rawValue: "input")
+    let output = AudioGraphPortID(rawValue: "output")
+  }
+
+  static let typeID = AudioGraphNodeTypeID(rawValue: "test.engine.executable-relay")
+  static let ports = Ports()
+  let breaksCycle: Bool
+  let isSink: Bool
+
+  func makeDescriptor() -> AudioGraphNodeDescriptor {
+    let signal = AudioGraphSignalType.audio(AudioGraphAudioSignalType())
+    return AudioGraphNodeDescriptor(
+      ports: [
+        .input(Self.ports.input, signal: signal),
+        .output(Self.ports.output, signal: signal),
+      ],
+      cycleBehavior: breaksCycle ? .breaksCycle : .combinational,
+      activation: isSink ? .sink : .onDemand
+    )
+  }
+
+  func prepare(
+    context: AudioGraphNodePreparationContext
+  ) async throws -> any PreparedAudioGraphNode {
+    throw TestRuntimeError.prepare
+  }
+}
+
 private enum TestRuntimeError: Error, Equatable {
   case prepare
   case start
@@ -618,5 +762,28 @@ private final class FailingStartRuntime: PreparedAudioGraphNode, @unchecked Send
 
   func render(context: AudioGraphRenderContext) -> AudioRenderResult {
     .rendered
+  }
+}
+
+private struct FailingRenderNode: AudioGraphExecutableNode {
+  static let typeID = AudioGraphNodeTypeID(rawValue: "test.engine.failing-render")
+
+  func makeDescriptor() -> AudioGraphNodeDescriptor {
+    AudioGraphNodeDescriptor(ports: [], activation: .sink)
+  }
+
+  func prepare(
+    context: AudioGraphNodePreparationContext
+  ) async throws -> any PreparedAudioGraphNode {
+    FailingRenderRuntime()
+  }
+}
+
+private final class FailingRenderRuntime: PreparedAudioGraphNode, @unchecked Sendable {
+  let outputFormats: [AudioGraphPortID: AudioProcessingFormat] = [:]
+  let timing = AudioNodeTiming.transparent
+
+  func render(context: AudioGraphRenderContext) -> AudioRenderResult {
+    .invalidFrameCount
   }
 }

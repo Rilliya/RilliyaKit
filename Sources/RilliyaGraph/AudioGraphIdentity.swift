@@ -140,3 +140,14 @@ public struct AudioGraphNodeHandle<Node: AudioGraphNode>: Hashable, Sendable {
     AudioGraphPortAddress(nodeID: id, portID: portID)
   }
 }
+
+func audioGraphNodeIDLessThan(_ left: AudioGraphNodeID, _ right: AudioGraphNodeID) -> Bool {
+  left.rawValue.uuidString < right.rawValue.uuidString
+}
+
+func audioGraphConnectionIDLessThan(
+  _ left: AudioGraphConnectionID,
+  _ right: AudioGraphConnectionID
+) -> Bool {
+  left.rawValue.uuidString < right.rawValue.uuidString
+}

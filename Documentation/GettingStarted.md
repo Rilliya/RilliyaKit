@@ -29,7 +29,8 @@ disconnected capture and generator nodes remain stopped.
 
 Retain the engine for the desired session and call `try await engine.stop()` during orderly
 shutdown. A stopped engine is terminal; prepare a new one after changing graph topology or native
-formats.
+formats. See [Error handling](ErrorHandling.md) to preview invalid connections, highlight exact
+graph elements, preserve custom node errors, and observe asynchronous runtime failures.
 
 ## Analyze windows without defining a node type
 

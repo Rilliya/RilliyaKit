@@ -5,7 +5,7 @@ import RilliyaGraph
 import RilliyaRealtime
 
 /// A failure while validating, preparing, starting, or rendering an executable graph.
-public enum AudioGraphEngineError: Error, LocalizedError, @unchecked Sendable {
+public enum AudioGraphEngineError: AudioGraphContextualError, LocalizedError, @unchecked Sendable {
   /// No node is a terminal sink, so none of the graph has observable work.
   case noActiveSink
 
@@ -13,31 +13,44 @@ public enum AudioGraphEngineError: Error, LocalizedError, @unchecked Sendable {
   case nodeIsNotExecutable(AudioGraphNodeID, AudioGraphNodeTypeID)
 
   /// The first runtime release supports audio connections but not control/event execution.
-  case unsupportedSignalConnection(AudioGraphConnectionID)
+  case unsupportedSignalConnection(
+    AudioGraphConnectionID,
+    source: AudioGraphPortAddress,
+    target: AudioGraphPortAddress
+  )
 
   /// Runtime scheduling does not yet support an executable feedback loop.
-  case unsupportedFeedbackCycle
+  case unsupportedFeedbackCycle(
+    nodeIDs: [AudioGraphNodeID],
+    connectionIDs: [AudioGraphConnectionID]
+  )
 
   /// A runtime did not publish a concrete format for one connected output.
   case missingOutputFormat(AudioGraphPortAddress)
 
   /// A runtime published an output that is absent or incompatible with its descriptor.
-  case invalidOutputFormat(AudioGraphPortAddress)
+  case invalidOutputFormat(AudioGraphPortAddress, actual: AudioProcessingFormat)
 
   /// Two prepared ports require incompatible concrete audio formats.
-  case incompatiblePreparedFormats(AudioGraphConnectionID)
+  case incompatiblePreparedFormats(
+    AudioGraphConnectionID,
+    source: AudioGraphPortAddress,
+    target: AudioGraphPortAddress,
+    sourceFormat: AudioProcessingFormat,
+    targetConstraint: AudioGraphAudioSignalType
+  )
 
   /// A background-driven graph resolved more than one sample clock.
-  case incompatibleDriverSampleRates
+  case incompatibleDriverSampleRates([Double])
 
   /// Active output buffers would exceed the configured scratch-memory budget.
-  case scratchMemoryLimitExceeded(Int)
+  case scratchMemoryLimitExceeded(requiredByteCount: Int, limit: Int)
 
   /// A node failed during preparation, startup, or cleanup while retaining its typed error.
   case nodeFailure(AudioGraphNodeFailure)
 
   /// A prepared node rejected one render quantum.
-  case nodeRenderFailed(AudioGraphNodeID, AudioRenderResult)
+  case nodeRenderFailed(AudioGraphNodeID, AudioGraphNodeTypeID, AudioRenderResult)
 
   /// A manual render was requested from a background-driven engine.
   case manualRenderUnavailable
@@ -52,29 +65,112 @@ public enum AudioGraphEngineError: Error, LocalizedError, @unchecked Sendable {
       "The graph has no active sink. Connect a terminal analyzer or destination before preparing it."
     case .nodeIsNotExecutable(_, let typeID):
       "Active node '\(typeID.rawValue)' does not provide an executable runtime."
-    case .unsupportedSignalConnection:
-      "This engine release does not execute connected control or structured signals yet."
-    case .unsupportedFeedbackCycle:
-      "Executable feedback graphs require a state-breaking runtime scheduler that is not available yet."
+    case .unsupportedSignalConnection(let connectionID, _, _):
+      "Connection \(connectionID.rawValue.uuidString) carries a signal this engine release does not execute."
+    case .unsupportedFeedbackCycle(let nodeIDs, _):
+      "Executable feedback scheduling is not available for the \(nodeIDs.count) involved nodes."
     case .missingOutputFormat(let address):
       "The runtime did not prepare audio output '\(address.portID.rawValue)'."
-    case .invalidOutputFormat(let address):
-      "The runtime prepared an invalid format for output '\(address.portID.rawValue)'."
-    case .incompatiblePreparedFormats:
-      "Connected nodes prepared incompatible concrete audio formats. Insert an explicit converter."
-    case .incompatibleDriverSampleRates:
-      "A background-driven graph must use one sample rate. Insert explicit sample-rate conversion."
-    case .scratchMemoryLimitExceeded(let limit):
-      "The graph exceeds its \(limit)-byte scratch-memory budget."
+    case .invalidOutputFormat(let address, let actual):
+      "The runtime prepared invalid format \(actual.channelCount) ch at \(actual.sampleRate) Hz for output '\(address.portID.rawValue)'."
+    case .incompatiblePreparedFormats(_, _, _, let sourceFormat, let targetConstraint):
+      "Prepared source format \(sourceFormat.channelCount) ch at \(sourceFormat.sampleRate) Hz does not satisfy target constraint \(targetConstraint). Insert an explicit converter."
+    case .incompatibleDriverSampleRates(let sampleRates):
+      "A background-driven graph resolved multiple sample rates \(sampleRates). Insert explicit sample-rate conversion."
+    case .scratchMemoryLimitExceeded(let requiredByteCount, let limit):
+      "The graph requires at least \(requiredByteCount) bytes of scratch storage, exceeding its \(limit)-byte limit."
     case .nodeFailure(let failure):
       failure.errorDescription
-    case .nodeRenderFailed(_, let result):
-      "A graph node rejected a render quantum: \(result)."
+    case .nodeRenderFailed(_, let typeID, let result):
+      "Node '\(typeID.rawValue)' rejected a render quantum: \(result)."
     case .manualRenderUnavailable:
       "Only a manually driven engine accepts renderOnce()."
     case .alreadyStopped:
       "A stopped audio graph engine cannot be restarted."
     }
+  }
+
+  /// A practical next step suitable for developer tools and workflow UI.
+  public var recoverySuggestion: String? {
+    switch self {
+    case .noActiveSink:
+      "Connect the graph to a terminal analyzer, playback destination, or another sink."
+    case .nodeIsNotExecutable:
+      "Remove the node from the active path or provide an AudioGraphExecutableNode implementation."
+    case .unsupportedSignalConnection:
+      "Keep this connection semantic-only or use a runtime that executes its signal family."
+    case .unsupportedFeedbackCycle:
+      "Break the runtime cycle with an executable stateful delay node."
+    case .missingOutputFormat, .invalidOutputFormat:
+      "Correct the node runtime so every connected audio output publishes a valid declared format."
+    case .incompatiblePreparedFormats:
+      "Insert an explicit channel or sample-rate converter between these ports."
+    case .incompatibleDriverSampleRates:
+      "Insert explicit sample-rate conversion so the driven graph uses one sample clock."
+    case .scratchMemoryLimitExceeded:
+      "Reduce the active graph or raise maximumScratchByteCount after reviewing its memory budget."
+    case .nodeFailure:
+      "Inspect underlyingError for the node package's typed recovery information."
+    case .nodeRenderFailed:
+      "Stop and prepare a new engine after correcting the node's realtime render implementation."
+    case .manualRenderUnavailable:
+      "Prepare the graph with the manual driver before calling renderOnce()."
+    case .alreadyStopped:
+      "Prepare a new engine instance before starting the graph again."
+    }
+  }
+
+  /// Node instances directly implicated by this failure.
+  public var nodeIDs: [AudioGraphNodeID] {
+    switch self {
+    case .nodeIsNotExecutable(let nodeID, _), .nodeRenderFailed(let nodeID, _, _):
+      [nodeID]
+    case .unsupportedSignalConnection(_, let source, let target):
+      source.nodeID == target.nodeID ? [source.nodeID] : [source.nodeID, target.nodeID]
+    case .unsupportedFeedbackCycle(let nodeIDs, _):
+      nodeIDs
+    case .incompatiblePreparedFormats(_, let source, let target, _, _):
+      source.nodeID == target.nodeID ? [source.nodeID] : [source.nodeID, target.nodeID]
+    case .missingOutputFormat(let address), .invalidOutputFormat(let address, _):
+      [address.nodeID]
+    case .nodeFailure(let failure):
+      [failure.nodeID]
+    default:
+      []
+    }
+  }
+
+  /// Connections directly implicated by this failure.
+  public var connectionIDs: [AudioGraphConnectionID] {
+    switch self {
+    case .unsupportedSignalConnection(let connectionID, _, _),
+      .incompatiblePreparedFormats(let connectionID, _, _, _, _):
+      [connectionID]
+    case .unsupportedFeedbackCycle(_, let connectionIDs):
+      connectionIDs
+    default:
+      []
+    }
+  }
+
+  /// Port addresses directly implicated by this failure.
+  public var portAddresses: [AudioGraphPortAddress] {
+    switch self {
+    case .unsupportedSignalConnection(_, let source, let target):
+      [source, target]
+    case .incompatiblePreparedFormats(_, let source, let target, _, _):
+      [source, target]
+    case .missingOutputFormat(let address), .invalidOutputFormat(let address, _):
+      [address]
+    default:
+      []
+    }
+  }
+
+  /// The original concrete node-package error when one exists.
+  public var underlyingError: (any Error)? {
+    guard case .nodeFailure(let failure) = self else { return nil }
+    return failure.underlyingError
   }
 }
 
@@ -166,7 +262,7 @@ final class PreparedAudioGraphPlan: @unchecked Sendable {
       operation.clearOutputs(frameCount: frameCount)
       let result = operation.render(frameCount: frameCount)
       guard result == .rendered else {
-        return .nodeRenderFailed(operation.nodeID, result)
+        return .nodeRenderFailed(operation.nodeID, operation.nodeTypeID, result)
       }
     }
     return nil
@@ -393,7 +489,11 @@ enum AudioGraphCompiler {
         case .audio = source.signalType,
         case .audio = target.signalType
       else {
-        throw AudioGraphEngineError.unsupportedSignalConnection(connection.id)
+        throw AudioGraphEngineError.unsupportedSignalConnection(
+          connection.id,
+          source: connection.source,
+          target: connection.target
+        )
       }
     }
 
@@ -425,7 +525,13 @@ enum AudioGraphCompiler {
             throw AudioGraphEngineError.missingOutputFormat(connection.source)
           }
           guard constraint.accepts(buffer.format) else {
-            throw AudioGraphEngineError.incompatiblePreparedFormats(connection.id)
+            throw AudioGraphEngineError.incompatiblePreparedFormats(
+              connection.id,
+              source: connection.source,
+              target: connection.target,
+              sourceFormat: buffer.format,
+              targetConstraint: constraint
+            )
           }
           return buffer.format
         }
@@ -460,7 +566,7 @@ enum AudioGraphCompiler {
           case .audio(let constraint) = descriptor.signalType,
           constraint.accepts(format)
         else {
-          throw AudioGraphEngineError.invalidOutputFormat(address)
+          throw AudioGraphEngineError.invalidOutputFormat(address, actual: format)
         }
         guard
           let requiredBytes = scratchByteCount(
@@ -469,7 +575,8 @@ enum AudioGraphCompiler {
           )
         else {
           throw AudioGraphEngineError.scratchMemoryLimitExceeded(
-            configuration.maximumScratchByteCount
+            requiredByteCount: Int.max,
+            limit: configuration.maximumScratchByteCount
           )
         }
         let addition = allocatedByteCount.addingReportingOverflow(requiredBytes)
@@ -477,7 +584,8 @@ enum AudioGraphCompiler {
           addition.partialValue <= configuration.maximumScratchByteCount
         else {
           throw AudioGraphEngineError.scratchMemoryLimitExceeded(
-            configuration.maximumScratchByteCount
+            requiredByteCount: addition.overflow ? Int.max : addition.partialValue,
+            limit: configuration.maximumScratchByteCount
           )
         }
         allocatedByteCount = addition.partialValue
@@ -526,7 +634,7 @@ enum AudioGraphCompiler {
 
     let sampleRates = Set(outputBuffers.values.map { $0.format.sampleRate })
     guard configuration.driver == .manual || sampleRates.count <= 1 else {
-      throw AudioGraphEngineError.incompatibleDriverSampleRates
+      throw AudioGraphEngineError.incompatibleDriverSampleRates(sampleRates.sorted())
     }
     return PreparedAudioGraphPlan(
       operations: operations,
@@ -584,7 +692,21 @@ enum AudioGraphCompiler {
       }
     }
     guard result.count == stableNodeIDs.count else {
-      throw AudioGraphEngineError.unsupportedFeedbackCycle
+      let involvedNodeIDs = stableNodeIDs.filter { indegree[$0, default: 0] > 0 }.sorted {
+        $0.rawValue.uuidString < $1.rawValue.uuidString
+      }
+      let involvedNodeIDSet = Set(involvedNodeIDs)
+      let involvedConnectionIDs = connections.compactMap {
+        involvedNodeIDSet.contains($0.source.nodeID)
+          && involvedNodeIDSet.contains($0.target.nodeID)
+          ? $0.id : nil
+      }.sorted {
+        $0.rawValue.uuidString < $1.rawValue.uuidString
+      }
+      throw AudioGraphEngineError.unsupportedFeedbackCycle(
+        nodeIDs: involvedNodeIDs,
+        connectionIDs: involvedConnectionIDs
+      )
     }
     return result
   }

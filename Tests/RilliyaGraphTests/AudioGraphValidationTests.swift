@@ -59,20 +59,46 @@ struct AudioGraphValidationTests {
   @Test("Rejects malformed third-party node definitions")
   func rejectsMalformedDefinitions() throws {
     var graph = AudioGraph()
-    #expect(throws: AudioGraphMutationError.emptyNodeTypeID) {
-      try graph.add(EmptyTypeIDNode())
+    try expectDefinitionFailure(
+      graph: &graph,
+      node: EmptyTypeIDNode(),
+      issue: .emptyNodeTypeID
+    )
+    try expectDefinitionFailure(
+      graph: &graph,
+      node: BadPortsNode(),
+      issue: .duplicatePortID(BadPortsNode.ports.value)
+    )
+    try expectDefinitionFailure(
+      graph: &graph,
+      node: BadPolicyNode(),
+      issue: .invalidPortConnectionPolicy(BadPolicyNode.ports.input)
+    )
+    try expectDefinitionFailure(
+      graph: &graph,
+      node: BadAudioNode(),
+      issue: .invalidAudioSignalConstraint(BadAudioNode.ports.audio)
+    )
+  }
+
+  @Test("Retains a node package's typed descriptor error with node context")
+  func retainsDescriptorFailure() throws {
+    var graph = AudioGraph()
+    let nodeID = AudioGraphNodeID()
+
+    let error = #expect(throws: AudioGraphMutationError.self) {
+      try graph.add(ThrowingDescriptorNode(), id: nodeID)
     }
-    #expect(throws: AudioGraphMutationError.duplicatePortID(BadPortsNode.ports.value)) {
-      try graph.add(BadPortsNode())
+    guard let error, case .nodeDescriptorFailed(let failure) = error else {
+      Issue.record("Expected a contextual descriptor failure")
+      return
     }
-    #expect(throws: AudioGraphMutationError.invalidPortConnectionPolicy(BadPolicyNode.ports.input))
-    {
-      try graph.add(BadPolicyNode())
-    }
-    #expect(throws: AudioGraphMutationError.invalidAudioSignalConstraint(BadAudioNode.ports.audio))
-    {
-      try graph.add(BadAudioNode())
-    }
+
+    #expect(failure.nodeID == nodeID)
+    #expect(failure.nodeTypeID == ThrowingDescriptorNode.typeID)
+    #expect(failure.underlyingError as? TestNodeDefinitionError == .invalidConfiguration)
+    #expect(error.underlyingError as? TestNodeDefinitionError == .invalidConfiguration)
+    #expect(error.nodeIDs == [nodeID])
   }
 
   @Test("Enforces checked configurable resource limits")
@@ -86,9 +112,15 @@ struct AudioGraphValidationTests {
     var graph = AudioGraph(configuration: AudioGraphConfiguration(limits: limits))
     _ = try graph.add(OnePortSource())
 
-    #expect(throws: AudioGraphMutationError.resourceLimitExceeded(.nodes, limit: 1)) {
+    let error = #expect(throws: AudioGraphMutationError.self) {
       try graph.add(OnePortSource())
     }
+    guard let error, case .resourceLimitExceeded(let resource, let limit) = error else {
+      Issue.record("Expected the configured graph bound to reject the node")
+      return
+    }
+    #expect(resource == .nodes)
+    #expect(limit == 1)
     #expect(throws: AudioGraphLimitConfigurationError.invalidMaximumNodeCount(0)) {
       try AudioGraphLimits(maximumNodeCount: 0)
     }
@@ -117,6 +149,25 @@ struct AudioGraphValidationTests {
     #expect(snapshot.nodes.count == nodeCount)
     #expect(snapshot.connections.count == nodeCount - 1)
   }
+
+  private func expectDefinitionFailure<Node: AudioGraphNode>(
+    graph: inout AudioGraph,
+    node: Node,
+    issue: AudioGraphNodeDefinitionIssue
+  ) throws {
+    let nodeID = AudioGraphNodeID()
+    let error = #expect(throws: AudioGraphMutationError.self) {
+      try graph.add(node, id: nodeID)
+    }
+    guard let error, case .invalidNodeDefinition(let failure) = error else {
+      Issue.record("Expected a contextual invalid-node-definition failure")
+      return
+    }
+    #expect(failure.nodeID == nodeID)
+    #expect(failure.nodeTypeID == Node.typeID)
+    #expect(failure.issue == issue)
+    #expect(error.nodeIDs == [nodeID])
+  }
 }
 
 private struct EmptyTypeIDNode: AudioGraphNode {
@@ -124,6 +175,18 @@ private struct EmptyTypeIDNode: AudioGraphNode {
 
   func makeDescriptor() -> AudioGraphNodeDescriptor {
     AudioGraphNodeDescriptor(ports: [])
+  }
+}
+
+private enum TestNodeDefinitionError: Error, Equatable {
+  case invalidConfiguration
+}
+
+private struct ThrowingDescriptorNode: AudioGraphNode {
+  static let typeID = AudioGraphNodeTypeID(rawValue: "test.throwing-descriptor")
+
+  func makeDescriptor() throws -> AudioGraphNodeDescriptor {
+    throw TestNodeDefinitionError.invalidConfiguration
   }
 }
 

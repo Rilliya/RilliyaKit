@@ -19,6 +19,9 @@ public struct AudioGraphDiagnostic: Equatable, Sendable {
   /// Nodes directly involved in this diagnostic, sorted by stable identity.
   public let nodeIDs: [AudioGraphNodeID]
 
+  /// Connections directly involved in this diagnostic, sorted by stable identity.
+  public let connectionIDs: [AudioGraphConnectionID]
+
   /// A concise human-readable explanation.
   public let message: String
 
@@ -26,10 +29,12 @@ public struct AudioGraphDiagnostic: Equatable, Sendable {
   public init(
     code: AudioGraphDiagnosticCode,
     nodeIDs: [AudioGraphNodeID] = [],
+    connectionIDs: [AudioGraphConnectionID] = [],
     message: String
   ) {
     self.code = code
     self.nodeIDs = nodeIDs
+    self.connectionIDs = connectionIDs
     self.message = message
   }
 }
@@ -58,10 +63,21 @@ enum AudioGraphValidator {
       nodes: nodes,
       connections: connections
     )
+    let nodesByID = Dictionary(uniqueKeysWithValues: nodes.map { ($0.id, $0) })
     var diagnostics = cycleComponents.map { component in
-      AudioGraphDiagnostic(
+      let componentNodeIDs = Set(component)
+      let connectionIDs = connections.compactMap { connection -> AudioGraphConnectionID? in
+        guard connection.isEnabled,
+          componentNodeIDs.contains(connection.source.nodeID),
+          componentNodeIDs.contains(connection.target.nodeID),
+          nodesByID[connection.source.nodeID]?.descriptor.cycleBehavior != .breaksCycle
+        else { return nil }
+        return connection.id
+      }.sorted(by: audioGraphConnectionIDLessThan)
+      return AudioGraphDiagnostic(
         code: .cycle,
         nodeIDs: component,
+        connectionIDs: connectionIDs,
         message:
           "The graph contains a same-render dependency cycle. Insert an explicit state-breaking node such as a delay."
       )
@@ -170,6 +186,6 @@ enum AudioGraphValidator {
   }
 
   private static func lessThan(_ left: AudioGraphNodeID, _ right: AudioGraphNodeID) -> Bool {
-    left.rawValue.uuidString < right.rawValue.uuidString
+    audioGraphNodeIDLessThan(left, right)
   }
 }
