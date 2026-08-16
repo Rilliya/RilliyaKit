@@ -32,6 +32,15 @@ public enum AudioGraphCycleBehavior: String, Hashable, Codable, Sendable {
   case breaksCycle
 }
 
+/// Whether a node is activated only by downstream demand or acts as an execution sink.
+public enum AudioGraphNodeActivation: String, Hashable, Codable, Sendable {
+  /// The node runs only when one of its outputs contributes to an active sink.
+  case onDemand
+
+  /// The node is an execution root even when it also exposes optional pass-through outputs.
+  case sink
+}
+
 /// The semantic definition of one graph port.
 public struct AudioGraphPortDescriptor: Hashable, Codable, Sendable {
   /// The stable node-local identity of the port.
@@ -95,13 +104,18 @@ public struct AudioGraphNodeDescriptor: Hashable, Codable, Sendable {
   /// Whether this node breaks a same-render dependency cycle.
   public let cycleBehavior: AudioGraphCycleBehavior
 
+  /// Whether this node participates only on demand or anchors an executable subgraph.
+  public let activation: AudioGraphNodeActivation
+
   /// Creates a node descriptor.
   public init(
     ports: [AudioGraphPortDescriptor],
-    cycleBehavior: AudioGraphCycleBehavior = .combinational
+    cycleBehavior: AudioGraphCycleBehavior = .combinational,
+    activation: AudioGraphNodeActivation = .onDemand
   ) {
     self.ports = ports
     self.cycleBehavior = cycleBehavior
+    self.activation = activation
   }
 }
 

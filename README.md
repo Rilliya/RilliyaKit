@@ -4,23 +4,30 @@ RilliyaKit is the open-source audio foundation behind Rilliya. It provides
 macOS-native building blocks for discovering, capturing, metering, processing,
 and playing audio without depending on application UI types.
 
-Once node packages are imported, a validated graph is intentionally small to write:
+Once node packages are imported, the common path is intentionally small:
 
 ```swift
+import RilliyaCaptureNodes
+import RilliyaEngine
 import RilliyaGraph
+import SomeAnalyzerNodes
 
 var graph = AudioGraph()
-let source = try graph.add(MyAudioSource())
-let analyzer = try graph.add(MyAnalyzer(windowFrameCount: 2_048))
+let source = try graph.add(ApplicationAudioInput(processID: processID))
+let analyzer = try graph.add(SpectralAnalyzerNode())
 
 try graph.connect(source.audio, to: analyzer.input)
-let snapshot = try graph.snapshot()
+
+let engine = try await AudioGraphEngine.prepare(graph)
+try await engine.start()
 ```
 
-An analyzer may be a terminal node with no output. Sources, processors, sinks, and
-third-party nodes use the same `add` and `connect` operations; configuration stays in
-the node value with ordinary Swift defaults. Complete buildable examples live in
-[`Examples`](Examples).
+An analyzer may be a terminal node with no output. Sources, processors, sinks, and third-party
+nodes use the same `add` and `connect` operations; configuration stays in the node value with
+ordinary Swift defaults. Format negotiation, bounded buffers, realtime scheduling, and lifecycle
+ordering remain inside the engine. See [Getting started](Documentation/GettingStarted.md) for two
+short paths and [Creating graph nodes](Documentation/CreatingGraphNodes.md) when publishing a node
+package. Complete buildable examples live in [`Examples`](Examples).
 
 The package is preparing its first public prerelease, `0.1.0-prealpha.1`, and
 currently requires macOS 14.2 or later and Swift 6. Public API may change before
@@ -65,6 +72,8 @@ files still import the modules that define the APIs they use.
 | `RilliyaDSP` | Prepared gain, mixing, delay, noise gate, and signal generation | `RilliyaRealtime`, Swift Atomics |
 | `RilliyaPlayback` | Prepared-source playback to a Core Audio output device | `RilliyaCore`, `RilliyaRealtime` |
 | `RilliyaGraph` | UI-independent typed graph construction and validation | None |
+| `RilliyaEngine` | Bounded graph preparation, execution, and asynchronous analysis windows | `RilliyaGraph`, `RilliyaRealtime` |
+| `RilliyaCaptureNodes` | Ready-to-connect application and device capture nodes | `RilliyaCore`, `RilliyaCapture`, `RilliyaEngine`, `RilliyaGraph`, `RilliyaRealtime` |
 | `RilliyaKit` | All modules above | All modules above |
 
 For example, an app that already knows a device UID and only needs to send a
@@ -78,11 +87,12 @@ identifiers. Realtime objects are explicitly prepared with bounded storage befor
 rendering; their render paths avoid allocation, locks, logging, and application
 callbacks.
 
-`RilliyaGraph` is a UI-independent graph contract under active development. Its
-graph accepts trusted consumer-defined node values, stable semantic port IDs,
-audio and typed control signals, bounded graph policy, shared connection validation,
-and nonrecursive cycle detection. It currently builds validated semantic snapshots;
-runtime preparation and built-in audio node factories are the next prerelease layer.
+`RilliyaGraph` is a UI-independent graph contract under active development. Its graph accepts
+trusted consumer-defined node values, stable semantic port IDs, audio and typed control signals,
+bounded graph policy, shared connection validation, and nonrecursive cycle detection.
+`RilliyaEngine` prepares the active subgraph, resolves concrete formats, allocates bounded planar
+storage, and drives its executable node runtimes. `RilliyaCaptureNodes` supplies ready-to-connect
+application-output and physical or virtual input-device sources.
 
 ```swift
 import RilliyaGraph
@@ -99,6 +109,26 @@ let snapshot = try graph.snapshot()
 Graph resource limits have safe defaults and may be raised explicitly. A deterministic
 test constructs and validates 10,000 nodes without recursive traversal; large graphs
 remain bounded rather than claiming unlimited realtime work.
+
+An executable node adopts `AudioGraphExecutableNode` and prepares its runtime only after upstream
+formats are known. Existing `PreparedAudioSource` and `PreparedAudioProcessor` implementations
+have single-bus graph adapters. Most asynchronous analyzers can use the ready-made
+`AudioWindowAnalyzerNode`: the render path writes only to a bounded SPSC buffer, while the
+consumer's handler receives owned overlapping windows away from audio work.
+
+```swift
+let analyzer = try graph.add(
+  AudioWindowAnalyzerNode { window in
+    await analyze(window)
+  }
+)
+```
+
+Nodes with no connected path to a sink are not prepared or started. A sink may have no output at
+all; analysis does not require a playback destination. Window handlers are trusted asynchronous
+code and should observe task cancellation. The current background driver requires one sample rate
+across its active subgraphs and reports a typed error when explicit sample-rate conversion is
+needed.
 
 `AudioCatalogSnapshot` contains value types for audio processes, devices,
 directional endpoints, native streams, and channels. Persistent device UIDs and

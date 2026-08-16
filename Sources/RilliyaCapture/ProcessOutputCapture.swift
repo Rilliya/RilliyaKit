@@ -18,6 +18,9 @@ public struct AudioMeterCaptureConfiguration: Hashable, Sendable {
   /// The decibel value reported for silence and values below the display floor.
   public let minimumDecibels: Float
 
+  /// Whether capture computes and publishes meter and waveform snapshots.
+  public let publishesMeterSnapshots: Bool
+
   /// Creates a bounded meter capture configuration.
   ///
   /// Values are clamped to safe visualizer ranges: 1...60 updates per second, 1...512 waveform
@@ -25,7 +28,8 @@ public struct AudioMeterCaptureConfiguration: Hashable, Sendable {
   public init(
     updatesPerSecond: Int = 30,
     waveformSampleCount: Int = 128,
-    minimumDecibels: Float = -120
+    minimumDecibels: Float = -120,
+    publishesMeterSnapshots: Bool = true
   ) {
     let finiteMinimumDecibels = minimumDecibels.isFinite ? minimumDecibels : -120
     self.updatesPerSecond = min(max(updatesPerSecond, 1), 60)
@@ -34,6 +38,7 @@ public struct AudioMeterCaptureConfiguration: Hashable, Sendable {
       Self.maximumWaveformSampleCount
     )
     self.minimumDecibels = min(max(finiteMinimumDecibels, -200), -1)
+    self.publishesMeterSnapshots = publishesMeterSnapshots
   }
 }
 

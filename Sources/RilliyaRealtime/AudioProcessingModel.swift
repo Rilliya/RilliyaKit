@@ -169,6 +169,12 @@ public struct AudioProcessingFormat: Equatable, Hashable, Sendable {
   /// The maximum supported channel count for one processing bus.
   public static let maximumChannelCount = 256
 
+  /// A common two-channel, 48 kHz processing format.
+  public static let stereo48kHz = AudioProcessingFormat(
+    validatedSampleRate: 48_000,
+    channelCount: 2
+  )
+
   /// The number of sample frames per second.
   public let sampleRate: Double
 
@@ -183,6 +189,11 @@ public struct AudioProcessingFormat: Equatable, Hashable, Sendable {
     guard (1...Self.maximumChannelCount).contains(channelCount) else {
       throw AudioDSPConfigurationError.invalidChannelCount(channelCount)
     }
+    self.sampleRate = sampleRate
+    self.channelCount = channelCount
+  }
+
+  private init(validatedSampleRate sampleRate: Double, channelCount: Int) {
     self.sampleRate = sampleRate
     self.channelCount = channelCount
   }

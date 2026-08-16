@@ -17,6 +17,10 @@ version section with migration guidance.
 - Public output-device playback using AUHAL.
 - UI-independent typed graph construction with consumer-defined node values, shared
   connection compatibility, configurable resource limits, and nonrecursive cycle validation.
+- Bounded graph preparation and execution with on-demand activation, prepared source and
+  processor adapters, and asynchronous overlapping analysis-window sinks.
+- Ready-to-connect application-output and input-device graph source nodes that avoid unused meter
+  work, plus a closure-backed terminal audio-window analyzer node.
 
 ### Changed
 

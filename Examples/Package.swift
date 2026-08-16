@@ -11,6 +11,7 @@ let package = Package(
   products: [
     .executable(name: "MinimalGraph", targets: ["MinimalGraph"]),
     .executable(name: "CustomNode", targets: ["CustomNode"]),
+    .executable(name: "ExecutableGraph", targets: ["ExecutableGraph"]),
     .executable(name: "LargeGraph", targets: ["LargeGraph"]),
   ],
   dependencies: [
@@ -24,6 +25,14 @@ let package = Package(
     .executableTarget(
       name: "CustomNode",
       dependencies: [.product(name: "RilliyaGraph", package: "RilliyaKit")]
+    ),
+    .executableTarget(
+      name: "ExecutableGraph",
+      dependencies: [
+        .product(name: "RilliyaEngine", package: "RilliyaKit"),
+        .product(name: "RilliyaGraph", package: "RilliyaKit"),
+        .product(name: "RilliyaRealtime", package: "RilliyaKit"),
+      ]
     ),
     .executableTarget(
       name: "LargeGraph",

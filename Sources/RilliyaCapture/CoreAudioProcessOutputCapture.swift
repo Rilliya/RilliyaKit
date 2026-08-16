@@ -32,7 +32,7 @@ private final class CoreAudioProcessOutputCaptureResource:
 
   private let lock = NSLock()
   private let ioQueue: DispatchQueue
-  private let meterBridge: RealtimeMeterBridge
+  private let meterBridge: RealtimeMeterBridge?
   private var tapID: AudioObjectID
   private var aggregateID: AudioObjectID
   private var ioProcedureID: AudioDeviceIOProcID?
@@ -127,21 +127,23 @@ private final class CoreAudioProcessOutputCaptureResource:
         label: "moe.uwucocoa.rilliyakit.process-tap.\(processID.rawValue)",
         qos: .userInteractive
       )
-      meterBridge = RealtimeMeterBridge(
-        sampleRate: format.sampleRate,
-        channelIDs: format.channelIDs,
-        configuration: configuration,
-        snapshotHandler: { sequence, frameCount, channels in
-          snapshotHandler(
-            ProcessOutputMeterSnapshot(
-              format: format,
-              sequence: sequence,
-              frameCount: frameCount,
-              channels: channels
+      meterBridge =
+        configuration.publishesMeterSnapshots
+        ? RealtimeMeterBridge(
+          sampleRate: format.sampleRate,
+          channelIDs: format.channelIDs,
+          configuration: configuration,
+          snapshotHandler: { sequence, frameCount, channels in
+            snapshotHandler(
+              ProcessOutputMeterSnapshot(
+                format: format,
+                sequence: sequence,
+                frameCount: frameCount,
+                channels: channels
+              )
             )
-          )
-        }
-      )
+          }
+        ) : nil
     } catch {
       if newAggregateID != kAudioObjectUnknown {
         AudioHardwareDestroyAggregateDevice(newAggregateID)
@@ -175,7 +177,7 @@ private final class CoreAudioProcessOutputCaptureResource:
         ioQueue
       ) { _, input, _, _, _ in
         frameBuffer.write(input)
-        meterBridge.consume(input)
+        meterBridge?.consume(input)
       },
       operation: .createIOProcedure
     )
@@ -224,7 +226,7 @@ private final class CoreAudioProcessOutputCaptureResource:
       }
     }
     isRunning = false
-    meterBridge.stopPublishing()
+    meterBridge?.stopPublishing()
 
     if aggregateID != kAudioObjectUnknown {
       let status = AudioHardwareDestroyAggregateDevice(aggregateID)

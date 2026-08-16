@@ -58,7 +58,7 @@ private final class CoreAudioDeviceInputCaptureResource:
   let frameBuffer: AudioRealtimeFrameBuffer
 
   private let lock = NSLock()
-  private let meterBridge: RealtimeMeterBridge
+  private let meterBridge: RealtimeMeterBridge?
   private let failureBridge: DeviceInputFailureBridge
   private let renderStorage: DeviceInputRenderStorage
   private var audioUnit: AudioUnit?
@@ -143,21 +143,23 @@ private final class CoreAudioDeviceInputCaptureResource:
       channelCount: channelIDs.count,
       maximumFrames: Int(maximumFrames)
     )
-    let meterBridge = RealtimeMeterBridge(
-      sampleRate: captureFormat.sampleRate,
-      channelIDs: captureFormat.channelIDs,
-      configuration: configuration,
-      snapshotHandler: { sequence, frameCount, channels in
-        snapshotHandler(
-          DeviceInputMeterSnapshot(
-            format: captureFormat,
-            sequence: sequence,
-            frameCount: frameCount,
-            channels: channels
+    let meterBridge =
+      configuration.publishesMeterSnapshots
+      ? RealtimeMeterBridge(
+        sampleRate: captureFormat.sampleRate,
+        channelIDs: captureFormat.channelIDs,
+        configuration: configuration,
+        snapshotHandler: { sequence, frameCount, channels in
+          snapshotHandler(
+            DeviceInputMeterSnapshot(
+              format: captureFormat,
+              sequence: sequence,
+              frameCount: frameCount,
+              channels: channels
+            )
           )
-        )
-      }
-    )
+        }
+      ) : nil
     let failureBridge = DeviceInputFailureBridge(handler: failureHandler)
 
     format = captureFormat
@@ -210,7 +212,7 @@ private final class CoreAudioDeviceInputCaptureResource:
   func stop() throws {
     lock.lock()
     defer { lock.unlock() }
-    meterBridge.stopPublishing()
+    meterBridge?.stopPublishing()
     failureBridge.stopPublishing()
 
     guard let retainedAudioUnit = audioUnit else { return }
@@ -269,7 +271,7 @@ private final class CoreAudioDeviceInputCaptureResource:
       return status
     }
     frameBuffer.write(UnsafePointer(buffers))
-    meterBridge.consume(UnsafePointer(buffers))
+    meterBridge?.consume(UnsafePointer(buffers))
     return noErr
   }
 
