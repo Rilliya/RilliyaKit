@@ -18,6 +18,7 @@ let package = Package(
         "RilliyaCapture",
         "RilliyaDSP",
         "RilliyaPlayback",
+        "RilliyaGraph",
       ]
     ),
     .library(name: "RilliyaCore", targets: ["RilliyaCore"]),
@@ -26,6 +27,7 @@ let package = Package(
     .library(name: "RilliyaCapture", targets: ["RilliyaCapture"]),
     .library(name: "RilliyaDSP", targets: ["RilliyaDSP"]),
     .library(name: "RilliyaPlayback", targets: ["RilliyaPlayback"]),
+    .library(name: "RilliyaGraph", targets: ["RilliyaGraph"]),
   ],
   dependencies: [
     .package(
@@ -57,6 +59,7 @@ let package = Package(
       name: "RilliyaPlayback",
       dependencies: ["RilliyaCore", "RilliyaRealtime"]
     ),
+    .target(name: "RilliyaGraph"),
     .testTarget(
       name: "RilliyaKitTests",
       dependencies: [
@@ -68,6 +71,7 @@ let package = Package(
         "RilliyaPlayback",
       ]
     ),
+    .testTarget(name: "RilliyaGraphTests", dependencies: ["RilliyaGraph"]),
   ],
   swiftLanguageModes: [.v6]
 )

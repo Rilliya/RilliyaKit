@@ -4,6 +4,24 @@ RilliyaKit is the open-source audio foundation behind Rilliya. It provides
 macOS-native building blocks for discovering, capturing, metering, processing,
 and playing audio without depending on application UI types.
 
+Once node packages are imported, a validated graph is intentionally small to write:
+
+```swift
+import RilliyaGraph
+
+var graph = AudioGraph()
+let source = try graph.add(MyAudioSource())
+let analyzer = try graph.add(MyAnalyzer(windowFrameCount: 2_048))
+
+try graph.connect(source.audio, to: analyzer.input)
+let snapshot = try graph.snapshot()
+```
+
+An analyzer may be a terminal node with no output. Sources, processors, sinks, and
+third-party nodes use the same `add` and `connect` operations; configuration stays in
+the node value with ordinary Swift defaults. Complete buildable examples live in
+[`Examples`](Examples).
+
 The package is preparing its first public prerelease, `0.1.0-prealpha.1`, and
 currently requires macOS 14.2 or later and Swift 6. Public API may change before
 1.0, but released breaking changes are documented with migration guidance in
@@ -46,6 +64,7 @@ files still import the modules that define the APIs they use.
 | `RilliyaCapture` | Process-output and device-input capture with bounded meters | `RilliyaCore`, `RilliyaRealtime` |
 | `RilliyaDSP` | Prepared gain, mixing, delay, noise gate, and signal generation | `RilliyaRealtime`, Swift Atomics |
 | `RilliyaPlayback` | Prepared-source playback to a Core Audio output device | `RilliyaCore`, `RilliyaRealtime` |
+| `RilliyaGraph` | UI-independent typed graph construction and validation | None |
 | `RilliyaKit` | All modules above | All modules above |
 
 For example, an app that already knows a device UID and only needs to send a
@@ -58,6 +77,28 @@ Public APIs use RilliyaKit value types rather than transient Core Audio object
 identifiers. Realtime objects are explicitly prepared with bounded storage before
 rendering; their render paths avoid allocation, locks, logging, and application
 callbacks.
+
+`RilliyaGraph` is a UI-independent graph contract under active development. Its
+graph accepts trusted consumer-defined node values, stable semantic port IDs,
+audio and typed control signals, bounded graph policy, shared connection validation,
+and nonrecursive cycle detection. It currently builds validated semantic snapshots;
+runtime preparation and built-in audio node factories are the next prerelease layer.
+
+```swift
+import RilliyaGraph
+
+var graph = AudioGraph()
+let source = try graph.add(MySource())
+let processor = try graph.add(MyProcessor())
+
+try graph.connect(source.audio, to: processor.input)
+
+let snapshot = try graph.snapshot()
+```
+
+Graph resource limits have safe defaults and may be raised explicitly. A deterministic
+test constructs and validates 10,000 nodes without recursive traversal; large graphs
+remain bounded rather than claiming unlimited realtime work.
 
 `AudioCatalogSnapshot` contains value types for audio processes, devices,
 directional endpoints, native streams, and channels. Persistent device UIDs and

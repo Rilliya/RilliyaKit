@@ -3,5 +3,8 @@
 /.swiftpm/
 /DerivedData/
 /Package.resolved
+/Examples/.build/
+/Examples/.swiftpm/
+/Examples/Package.resolved
 *.xcodeproj
 xcuserdata/

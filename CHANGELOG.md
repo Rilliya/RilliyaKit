@@ -15,6 +15,8 @@ version section with migration guidance.
 - Bounded realtime frame transport and prepared audio source and processor contracts.
 - Prepared gain, matrix mixing, delay, noise gate, compressor, and signal generation DSP.
 - Public output-device playback using AUHAL.
+- UI-independent typed graph construction with consumer-defined node values, shared
+  connection compatibility, configurable resource limits, and nonrecursive cycle validation.
 
 ### Changed
 
@@ -35,4 +37,3 @@ version section with migration guidance.
 ## 0.1.0-prealpha.1
 
 This section will be finalized from `Unreleased` when the first public prerelease is tagged.
-
