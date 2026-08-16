@@ -119,6 +119,7 @@ let package = Package(
       name: "RilliyaCaptureNodesTests",
       dependencies: [
         "RilliyaCaptureNodes",
+        "RilliyaCapture",
         "RilliyaCore",
         "RilliyaEngine",
         "RilliyaGraph",

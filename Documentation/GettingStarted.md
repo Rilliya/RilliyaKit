@@ -64,6 +64,24 @@ The host application must request microphone permission before preparing an engi
 this node. Preparation failures preserve their concrete `DeviceInputCaptureError` inside
 `AudioGraphNodeFailure.underlyingError`.
 
+## Capture an output-device mix
+
+`OutputDeviceAudioInput` captures the process mix destined for a selected output device without
+muting ordinary playback. It accepts a persistent device UID from discovery:
+
+```swift
+let source = try graph.add(OutputDeviceAudioInput(deviceID: deviceID))
+```
+
+Use `OutputDeviceAudioInput()` to resolve the current system default during engine preparation.
+That choice remains fixed for the engine lifetime; prepare a new engine after a default-device
+change. Core Audio exposes device-specific taps one stream at a time, so the node captures stream
+zero. By default, the node excludes the host process when Core Audio currently publishes it, which
+avoids the common feedback path when a graph also plays to the captured device. Pass
+`processExclusion: .none` only when an exact all-process mix is needed and that feedback path is
+absent. The host application must provide `NSAudioCaptureUsageDescription`, and macOS requests
+system-audio recording permission when capture first starts.
+
 ## Choose a narrower product
 
 Import `RilliyaGraph` alone for semantic construction and validation. Add `RilliyaEngine` only for

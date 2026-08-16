@@ -87,6 +87,9 @@ public enum AudioSourceID: Hashable, Sendable {
 
   /// Audio entering through an input device.
   case deviceInput(AudioDeviceID)
+
+  /// The mixed process audio destined for an output device.
+  case deviceOutput(AudioDeviceID)
 }
 
 /// The identity of an audio destination that can receive routed audio.

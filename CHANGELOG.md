@@ -11,7 +11,8 @@ version section with migration guidance.
 ### Added
 
 - Focused products for discovery, capture, realtime transport, DSP, and playback.
-- Public process-output and device-input capture using supported macOS Core Audio APIs.
+- Public process-output, output-device mix, and device-input capture using supported macOS Core
+  Audio APIs.
 - Bounded realtime frame transport and prepared audio source and processor contracts.
 - Prepared gain, matrix mixing, delay, noise gate, compressor, and signal generation DSP.
 - Public output-device playback using AUHAL.
@@ -24,8 +25,8 @@ version section with migration guidance.
   connection compatibility, configurable resource limits, and nonrecursive cycle validation.
 - Bounded graph preparation and execution with on-demand activation, prepared source and
   processor adapters, and asynchronous overlapping analysis-window sinks.
-- Ready-to-connect application-output and input-device graph source nodes that avoid unused meter
-  work, plus a closure-backed terminal audio-window analyzer node.
+- Ready-to-connect application-output, output-device mix, and input-device graph source nodes that
+  avoid unused meter work, plus a closure-backed terminal audio-window analyzer node.
 - Structured graph and engine failures with exact node, connection, and port context, preserved
   custom-node errors, recovery suggestions, and bounded asynchronous engine-state observation.
 

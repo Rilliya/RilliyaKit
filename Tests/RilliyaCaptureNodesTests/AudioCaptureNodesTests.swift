@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import Foundation
+import RilliyaCapture
 import RilliyaCore
 import RilliyaEngine
 import RilliyaGraph
@@ -18,8 +19,11 @@ struct AudioCaptureNodesTests {
 
     let application = ApplicationAudioInput(processID: processID)
     let device = DeviceAudioInput(deviceID: deviceID)
+    let outputDevice = OutputDeviceAudioInput(deviceID: deviceID)
 
-    for descriptor in [application.makeDescriptor(), device.makeDescriptor()] {
+    for descriptor in [
+      application.makeDescriptor(), device.makeDescriptor(), outputDevice.makeDescriptor(),
+    ] {
       #expect(descriptor.activation == .onDemand)
       #expect(descriptor.ports.count == 1)
       #expect(descriptor.ports[0].id.rawValue == "audio")
@@ -32,6 +36,28 @@ struct AudioCaptureNodesTests {
       #expect(signal.channelCount == .any)
       #expect(signal.sampleRate == .any)
     }
+  }
+
+  @Test("Output-device nodes preserve explicit and default targets")
+  func outputDeviceTargets() throws {
+    let deviceID = try #require(AudioDeviceID(rawValue: "test.output"))
+    let processID = try #require(AudioProcessID(rawValue: 42))
+    let exclusion = DeviceOutputCaptureProcessExclusion(
+      processIDs: [processID],
+      excludesCurrentProcess: false
+    )
+
+    #expect(OutputDeviceAudioInput().target == .systemDefault)
+    #expect(OutputDeviceAudioInput().processExclusion.excludesCurrentProcess)
+    #expect(OutputDeviceAudioInput(deviceID: deviceID).target == .device(deviceID))
+    #expect(
+      OutputDeviceAudioInput(target: .device(deviceID), processExclusion: exclusion).target
+        == .device(deviceID)
+    )
+    #expect(
+      OutputDeviceAudioInput(target: .device(deviceID), processExclusion: exclusion)
+        .processExclusion == exclusion
+    )
   }
 
   @Test("A prepared capture source participates in the ordinary engine lifecycle")

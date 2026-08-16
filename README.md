@@ -70,7 +70,7 @@ files still import the modules that define the APIs they use.
 | `RilliyaCore` | Stable identities, catalog values, stream formats, and shared errors | None |
 | `RilliyaRealtime` | Prepared render contracts and a bounded realtime PCM frame buffer | Swift Atomics |
 | `RilliyaDiscovery` | Public Core Audio process and device catalog discovery | `RilliyaCore` |
-| `RilliyaCapture` | Process-output and device-input capture with bounded meters | `RilliyaCore`, `RilliyaRealtime` |
+| `RilliyaCapture` | Process-output, output-device mix, and input-device capture with bounded meters | `RilliyaCore`, `RilliyaRealtime` |
 | `RilliyaDSP` | Prepared gain, mixing, delay, noise gate, and signal generation | `RilliyaRealtime`, Swift Atomics |
 | `RilliyaFilePlayback` | Bounded background decoding of Core Audio-supported local files into realtime PCM | `RilliyaRealtime` |
 | `RilliyaFileWriting` | Bounded background encoding and file output using installed public Core Audio encoders | `RilliyaRealtime` |
@@ -173,6 +173,33 @@ if let processID = snapshot.processes.first(where: \.isRunningOutput)?.id {
 Capture callbacks are delivered on a private non-audio queue. Each snapshot is
 bounded by `ProcessOutputCaptureConfiguration`; the real-time IO callback uses
 preallocated storage and never invokes application code directly.
+
+`DeviceOutputCapture` captures the process mix destined for an output device. Pass a persistent
+UID from discovery, or resolve the current system default during preparation:
+
+```swift
+import RilliyaCapture
+
+let capture = try DeviceOutputCapture(target: .systemDefault) { snapshot in
+  print(snapshot.format.deviceID, snapshot.channels.map(\.peak))
+}
+
+try capture.start()
+try capture.stop()
+```
+
+Use `DeviceOutputCapture(deviceID:)` to select a concrete output device. A `.systemDefault` target
+is resolved once; it does not migrate when the default changes. Core Audio device taps bind one
+output stream, so RilliyaKit captures stream zero and publishes that index in the runtime format.
+The signal is Core Audio's mix of process output destined for that stream, before device-specific
+hardware processing.
+
+The default `DeviceOutputCaptureProcessExclusion` omits the host process when it has a current HAL
+process object, preventing common same-device feedback paths. Add explicit `AudioProcessID` values
+to the policy to omit other active processes, or use `.none` when an exact all-process mix is
+required and the capture will not feed the same device. The host application's `Info.plist` must
+contain `NSAudioCaptureUsageDescription`; macOS prompts for system-audio recording permission when
+tap IO first starts.
 
 `DeviceInputCapture` provides the same bounded meter surface for a physical or
 virtual Core Audio input device. It accepts the persistent `AudioDeviceID` exposed

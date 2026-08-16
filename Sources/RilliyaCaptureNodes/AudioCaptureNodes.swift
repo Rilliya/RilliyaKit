@@ -149,6 +149,90 @@ public struct DeviceAudioInput: AudioGraphExecutableNode {
   }
 }
 
+/// Captures the mixed process audio destined for one Core Audio output device.
+///
+/// Core Audio exposes device-specific taps one output stream at a time. This node captures the
+/// main stream at index zero and leaves ordinary hardware playback unchanged.
+@available(macOS 14.2, *)
+public struct OutputDeviceAudioInput: AudioGraphExecutableNode {
+  /// Named ports exposed by an output-device audio node handle.
+  public struct Ports: AudioGraphNodePorts {
+    /// The selected output device's mixed native channel bus.
+    public let audio = AudioGraphPortID(rawValue: "audio")
+
+    /// Creates the stable output-device audio port set.
+    public init() {}
+  }
+
+  /// The stable public node identity.
+  public static let typeID = AudioGraphNodeTypeID(
+    rawValue: "moe.uwucocoa.rilliyakit.capture.output-device-audio-input"
+  )
+
+  /// Stable named ports for typed graph handles.
+  public static let ports = Ports()
+
+  /// The output-device target resolved during graph preparation.
+  public let target: DeviceOutputCaptureTarget
+
+  /// The process-exclusion policy applied during graph preparation.
+  public let processExclusion: DeviceOutputCaptureProcessExclusion
+
+  /// Creates an output-device source.
+  ///
+  /// A system-default target is resolved once during graph preparation. Prepare a new engine after
+  /// the system default changes when the graph needs to follow that change.
+  public init(
+    target: DeviceOutputCaptureTarget = .systemDefault,
+    processExclusion: DeviceOutputCaptureProcessExclusion = DeviceOutputCaptureProcessExclusion()
+  ) {
+    self.target = target
+    self.processExclusion = processExclusion
+  }
+
+  /// Creates a source for one output device identified by its persistent Core Audio UID.
+  public init(
+    deviceID: AudioDeviceID,
+    processExclusion: DeviceOutputCaptureProcessExclusion = DeviceOutputCaptureProcessExclusion()
+  ) {
+    target = .device(deviceID)
+    self.processExclusion = processExclusion
+  }
+
+  /// Describes one runtime-resolved native audio output.
+  public func makeDescriptor() -> AudioGraphNodeDescriptor {
+    AudioGraphNodeDescriptor(
+      ports: [
+        .output(
+          Self.ports.audio,
+          signal: .audio(AudioGraphAudioSignalType())
+        )
+      ]
+    )
+  }
+
+  /// Creates the output-device tap away from the graph render path and disables unused meter work.
+  public func prepare(
+    context: AudioGraphNodePreparationContext
+  ) async throws -> any PreparedAudioGraphNode {
+    let target = target
+    let processExclusion = processExclusion
+    let capture = try await Task.detached(priority: .userInitiated) {
+      try DeviceOutputCapture(
+        target: target,
+        processExclusion: processExclusion,
+        configuration: AudioMeterCaptureConfiguration(publishesMeterSnapshots: false),
+        snapshotHandler: { _ in }
+      )
+    }.value
+    return try PreparedCapturedAudioSourceNode(
+      session: capture,
+      outputPortID: Self.ports.audio,
+      maximumFrameCount: context.maximumFrameCount
+    )
+  }
+}
+
 protocol AudioGraphCaptureSession: AnyObject, Sendable {
   var frameBuffer: AudioRealtimeFrameBuffer { get }
 
@@ -162,6 +246,9 @@ extension ProcessOutputCapture: AudioGraphCaptureSession {}
 
 @available(macOS 14.2, *)
 extension DeviceInputCapture: AudioGraphCaptureSession {}
+
+@available(macOS 14.2, *)
+extension DeviceOutputCapture: AudioGraphCaptureSession {}
 
 final class PreparedCapturedAudioSourceNode: PreparedAudioGraphNode, @unchecked Sendable {
   let outputFormats: [AudioGraphPortID: AudioProcessingFormat]
