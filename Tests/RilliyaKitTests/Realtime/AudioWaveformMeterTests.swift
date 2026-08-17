@@ -122,6 +122,49 @@ struct AudioWaveformMeterTests {
     #expect(meter.snapshot().isEmpty)
   }
 
+  /// A source that produces planar audio meters the same as one that produces interleaved, or a
+  /// file being played could not be drawn while a network stream could.
+  @Test("Planar audio meters the same as interleaved")
+  func planarMatchesInterleaved() {
+    let frames = Fixture.intervalFrameCount
+    let interleavedMeter = Fixture.meter()
+    let planarMeter = Fixture.meter()
+
+    var interleaved = [Float](repeating: 0, count: frames * Fixture.channelCount)
+    var left = [Float](repeating: 0, count: frames)
+    var right = [Float](repeating: 0, count: frames)
+    for frame in 0..<frames {
+      let value = Float(0.5 * sin(2 * .pi * 440 * Double(frame) / Fixture.sampleRate))
+      interleaved[frame * 2] = value
+      interleaved[frame * 2 + 1] = value * 0.25
+      left[frame] = value
+      right[frame] = value * 0.25
+    }
+    interleaved.withUnsafeBufferPointer {
+      guard let base = $0.baseAddress else { return }
+      interleavedMeter.submit(interleaved: base, frameCount: frames)
+    }
+    left.withUnsafeBufferPointer { l in
+      right.withUnsafeBufferPointer { r in
+        guard let lb = l.baseAddress, let rb = r.baseAddress else { return }
+        [lb, rb].withUnsafeBufferPointer { channels in
+          planarMeter.submit(planar: channels, frameCount: frames)
+        }
+      }
+    }
+
+    let fromInterleaved = interleavedMeter.snapshot()
+    let fromPlanar = planarMeter.snapshot()
+    #expect(fromPlanar.count == fromInterleaved.count)
+    #expect(fromPlanar.count == 2)
+    for (planar, woven) in zip(fromPlanar, fromInterleaved) {
+      #expect(abs(planar.rootMeanSquare - woven.rootMeanSquare) < 0.0001)
+      #expect(planar.waveform == woven.waveform)
+    }
+    // And the channels stayed apart rather than being averaged on the way in.
+    #expect(fromPlanar[0].rootMeanSquare > fromPlanar[1].rootMeanSquare * 3)
+  }
+
   private static func feedTone(
     _ meter: AudioWaveformMeter,
     frameCount: Int,

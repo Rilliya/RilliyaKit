@@ -2,6 +2,7 @@
 
 import AudioToolbox
 import Foundation
+import RilliyaCore
 import RilliyaRealtime
 
 /// The number of complete passes a file stream performs before finishing.
@@ -175,6 +176,14 @@ public final class AudioFileFrameStream: @unchecked Sendable {
   /// The decoded noninterleaved Float32 queue consumed by a realtime graph.
   public let frameBuffer: AudioRealtimeFrameBuffer
 
+  /// What the file currently sounds like, one entry per channel.
+  ///
+  /// Reading ``frameBuffer`` would take the audio away from whatever is playing it, so anything
+  /// that wants to draw the file reads this instead.
+  public func meterSnapshot() -> [AudioChannelMeterSnapshot] { meter.snapshot() }
+
+  private let meter: AudioWaveformMeter
+  private let streamID = UUID()
   private let url: URL
   private let configuration: AudioFileFrameStreamConfiguration
   private let eventHandler: EventHandler
@@ -210,6 +219,15 @@ public final class AudioFileFrameStream: @unchecked Sendable {
       ),
       capacityFrameCount: configuration.capacityFrameCount
     )
+    let streamID = self.streamID
+    meter = AudioWaveformMeter(
+      channelIDs: (0..<sourceDescription.channelCount).compactMap { index in
+        AudioChannelIndex(rawValue: index).map {
+          AudioChannelID(ownerID: .source(.stream(streamID)), index: $0)
+        }
+      },
+      sampleRate: configuration.sampleRate
+    )
   }
 
   deinit {
@@ -226,6 +244,7 @@ public final class AudioFileFrameStream: @unchecked Sendable {
       let configuration = configuration
       let channelCount = sourceDescription.channelCount
       let frameBuffer = frameBuffer
+      let meter = meter
       let eventHandler = eventHandler
       task = Task.detached(priority: .userInitiated) {
         do {
@@ -233,7 +252,8 @@ public final class AudioFileFrameStream: @unchecked Sendable {
             url: url,
             configuration: configuration,
             channelCount: channelCount,
-            frameBuffer: frameBuffer
+            frameBuffer: frameBuffer,
+            meter: meter
           )
           if !Task.isCancelled {
             eventHandler(.completed)
@@ -300,7 +320,8 @@ public final class AudioFileFrameStream: @unchecked Sendable {
     url: URL,
     configuration: AudioFileFrameStreamConfiguration,
     channelCount: Int,
-    frameBuffer: AudioRealtimeFrameBuffer
+    frameBuffer: AudioRealtimeFrameBuffer,
+    meter: AudioWaveformMeter
   ) async throws {
     var file: ExtAudioFileRef?
     let openStatus = ExtAudioFileOpenURL(url as CFURL, &file)
@@ -355,6 +376,7 @@ public final class AudioFileFrameStream: @unchecked Sendable {
       if requestedFrameCount > 0 {
         storage.withChannelPointers { pointers in
           _ = frameBuffer.writePlanar(pointers, frameCount: Int(requestedFrameCount))
+          meter.submit(planar: pointers, frameCount: Int(requestedFrameCount))
         }
         continue
       }

@@ -38,6 +38,44 @@ struct AudioFileFrameStreamTests {
     await source.stop()
   }
 
+  /// A file being played has no capture device to meter it, so it meters what it decodes.
+  ///
+  /// Without this an interface can draw nothing for a file, however audibly it is playing —
+  /// which is exactly what a visualizer connected to one used to show.
+  @Test("A playing file reports what it sounds like")
+  func fileReportsWhatItSoundsLike() async throws {
+    // Enough frames that a metering interval fills: fifty milliseconds at 48 kHz is 2400.
+    let frameCount = 6_000
+    let samples = (0..<frameCount).map { frame in
+      Float(0.5 * sin(2 * .pi * 440 * Double(frame) / 48_000))
+    }
+    let fixture = try TemporaryPCMFile(samples: samples)
+    let events = AsyncStream.makeStream(of: AudioFileFrameStreamEvent.self)
+    let source = try AudioFileFrameStream(
+      url: fixture.url,
+      configuration: AudioFileFrameStreamConfiguration(
+        sampleRate: 48_000,
+        capacityFrameCount: 16_384,
+        chunkFrameCount: 1_024
+      )
+    ) { event in
+      events.continuation.yield(event)
+    }
+
+    #expect(source.meterSnapshot().isEmpty, "nothing has been decoded yet")
+
+    source.start()
+    _ = await events.stream.first { _ in true }
+
+    let snapshot = source.meterSnapshot()
+    #expect(snapshot.count == 1, "one entry for the file's one channel")
+    let channel = try #require(snapshot.first)
+    #expect(!channel.waveform.isEmpty)
+    #expect(channel.rootMeanSquare > 0.1, "the file metered as silence")
+    #expect(channel.waveform.contains { abs($0) > 0.1 })
+    await source.stop()
+  }
+
   @Test("Finite looping counts complete file passes")
   func finiteLooping() async throws {
     let fixture = try TemporaryPCMFile(samples: [0.25, -0.25])

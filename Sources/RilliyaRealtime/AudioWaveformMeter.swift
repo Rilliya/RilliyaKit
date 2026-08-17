@@ -86,6 +86,33 @@ public final class AudioWaveformMeter: @unchecked Sendable {
     measure(frameCount: ready)
   }
 
+  /// Offers planar frames the producer has just put out, one pointer per channel.
+  ///
+  /// The same handoff as ``submit(interleaved:frameCount:)``; it weaves the channels together on
+  /// the way in because a meter reads them together.
+  public func submit(
+    planar channels: UnsafeBufferPointer<UnsafePointer<Float>>,
+    frameCount: Int
+  ) {
+    guard frameCount > 0, !channels.isEmpty else { return }
+    let ready: Int? = inputLock.withLock {
+      let room = capacityFrameCount - writtenFrameCount
+      guard room > 0 else { return writtenFrameCount }
+      let taken = min(room, frameCount)
+      let base = storage.advanced(by: writtenFrameCount * channelCount)
+      for frame in 0..<taken {
+        for channel in 0..<channelCount {
+          base[frame * channelCount + channel] =
+            channel < channels.count ? channels[channel][frame] : 0
+        }
+      }
+      writtenFrameCount += taken
+      return writtenFrameCount >= capacityFrameCount ? writtenFrameCount : nil
+    }
+    guard let ready else { return }
+    measure(frameCount: ready)
+  }
+
   /// The most recent snapshot, or an empty array before enough audio has arrived.
   public func snapshot() -> [AudioChannelMeterSnapshot] {
     lock.withLock { $0 }
