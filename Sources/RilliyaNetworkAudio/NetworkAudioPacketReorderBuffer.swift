@@ -128,6 +128,25 @@ public final class NetworkAudioPacketReorderBuffer {
     return .queued
   }
 
+  /// The sequences inside the window that have not arrived.
+  ///
+  /// These are exactly the packets still worth asking for: anything below the window has already
+  /// been released as a gap, and anything above it has not been reached. The same question serves
+  /// a reassembler asking which fragments of a block are missing.
+  public func missingSequences(limit: Int) -> [UInt64] {
+    guard let expected, presentCount > 0, limit > 0 else { return [] }
+    let highest = (0..<depth).filter { present[$0] }.map { sequences[$0] }.max() ?? expected
+    guard highest > expected else { return [] }
+    var missing: [UInt64] = []
+    var sequence = expected
+    while sequence < highest, missing.count < limit {
+      let slot = Int(sequence % UInt64(depth))
+      if !present[slot] || sequences[slot] != sequence { missing.append(sequence) }
+      sequence &+= 1
+    }
+    return missing
+  }
+
   /// Gives up on everything still held, releasing it in order.
   ///
   /// A stream that stops mid-gap would otherwise strand the packets that did arrive.

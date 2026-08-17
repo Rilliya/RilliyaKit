@@ -216,3 +216,85 @@ struct NetworkAudioPacketReorderBufferTests {
     }
   }
 }
+
+/// Which packets are still worth asking for is the same question a reassembler asks about the
+/// fragments of a block, so the reorder buffer answers it rather than a second bookkeeper.
+@Suite("Network audio missing packets")
+struct NetworkAudioMissingSequenceTests {
+  @Test("A run with no gaps has nothing missing")
+  func completeRunHasNothingMissing() throws {
+    let harness = try Harness(depth: 8)
+    for sequence in UInt64(0)..<6 { _ = harness.admit(sequence) }
+
+    #expect(harness.buffer.missingSequences(limit: 8).isEmpty)
+  }
+
+  @Test("A gap is named exactly once")
+  func gapIsNamed() throws {
+    let harness = try Harness(depth: 8)
+    _ = harness.admit(0)
+    _ = harness.admit(2)
+    _ = harness.admit(3)
+
+    #expect(harness.buffer.missingSequences(limit: 8) == [1])
+  }
+
+  @Test("Several gaps are named in the order the stream needs them")
+  func gapsAreOrdered() throws {
+    let harness = try Harness(depth: 8)
+    _ = harness.admit(0)
+    _ = harness.admit(3)
+    _ = harness.admit(5)
+
+    #expect(harness.buffer.missingSequences(limit: 8) == [1, 2, 4])
+  }
+
+  /// One request may only name so many, so the answer is capped where the request is.
+  @Test("No more are named than the caller can ask for")
+  func limitIsHonoured() throws {
+    let harness = try Harness(depth: 16)
+    _ = harness.admit(0)
+    _ = harness.admit(12)
+
+    #expect(harness.buffer.missingSequences(limit: 3) == [1, 2, 3])
+  }
+
+  /// A packet already conceded is past asking for, so naming it would waste the request.
+  @Test("A gap already given up on is not named")
+  func concededGapIsNotNamed() throws {
+    let harness = try Harness(depth: 4)
+    _ = harness.admit(0)
+    for sequence in UInt64(2)..<8 { _ = harness.admit(sequence) }
+
+    #expect(!harness.buffer.missingSequences(limit: 8).contains(1))
+  }
+
+  @Test("Nothing held means nothing to ask for")
+  func emptyBufferNamesNothing() throws {
+    let harness = try Harness(depth: 8)
+
+    #expect(harness.buffer.missingSequences(limit: 8).isEmpty)
+    _ = harness.admit(0)
+    #expect(harness.buffer.missingSequences(limit: 8).isEmpty)
+  }
+
+  private final class Harness {
+    let buffer: NetworkAudioPacketReorderBuffer
+
+    init(depth: Int) throws {
+      buffer = try NetworkAudioPacketReorderBuffer(
+        depth: depth,
+        maximumFrameCount: 1,
+        channelCount: 1
+      )
+    }
+
+    @discardableResult
+    func admit(_ sequence: UInt64) -> NetworkAudioReorderAdmission {
+      var sample = Float(sequence)
+      return withUnsafePointer(to: &sample) { pointer in
+        buffer.admit(sequence: sequence, samples: pointer, frameCount: 1) { _, _ in }
+      }
+    }
+  }
+}

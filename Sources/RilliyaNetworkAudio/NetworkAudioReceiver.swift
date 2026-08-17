@@ -27,6 +27,13 @@ public struct NetworkAudioReceiverConfiguration: Equatable, Hashable, Sendable {
   /// How much audio the receiver holds before a render callback may read it.
   public let jitter: AudioJitterBufferConfiguration
 
+  /// Whether a gap is asked for again rather than only waited out.
+  ///
+  /// Asking costs a datagram and only helps where the answer can arrive before the audio is
+  /// needed, so a receiver measures the round trip and stops asking when its own buffer is
+  /// shallower than that.
+  public let requestsRetransmission: Bool
+
   /// How many packets may be held while waiting for one that arrived out of order.
   ///
   /// A wired local network barely reorders, and a tunnel does. Holding costs nothing while the
@@ -50,6 +57,7 @@ public struct NetworkAudioReceiverConfiguration: Equatable, Hashable, Sendable {
     sessionTakeoverInterval: Duration = .seconds(1),
     jitter: AudioJitterBufferConfiguration = .localNetwork,
     reorderDepth: Int = 8,
+    requestsRetransmission: Bool = true,
     sharedKey: NetworkAudioSharedKey? = nil
   ) throws {
     guard port > 0 else { throw NetworkAudioReceiverError.invalidPort }
@@ -80,6 +88,7 @@ public struct NetworkAudioReceiverConfiguration: Equatable, Hashable, Sendable {
     self.sessionTakeoverInterval = sessionTakeoverInterval
     self.jitter = jitter
     self.reorderDepth = reorderDepth
+    self.requestsRetransmission = requestsRetransmission
     self.sharedKey = sharedKey
   }
 }
@@ -144,6 +153,12 @@ public struct NetworkAudioReceiverStatistics: Equatable, Sendable {
 
   /// Missing packet sequences observed before a later packet arrived.
   public let missingPacketCount: UInt64
+
+  /// Packets this receiver asked the sender to send again.
+  public let retransmissionRequestCount: UInt64
+
+  /// Packets that arrived because they were asked for.
+  public let retransmissionRecoveredCount: UInt64
 
   /// Current bounded PCM queue diagnostics.
   public let frameBuffer: AudioRealtimeFrameBufferStatistics
@@ -281,7 +296,15 @@ public final class NetworkAudioReceiver: @unchecked Sendable {
     connection.receiveMessage { [weak self, weak connection] content, _, _, error in
       guard let self, let connection else { return }
       if let content {
-        ingestor.ingest(content, now: DispatchTime.now().uptimeNanoseconds)
+        let now = DispatchTime.now().uptimeNanoseconds
+        ingestor.ingest(content, now: now)
+        // The reply goes back along the flow the audio arrived on, so the sender hears it without
+        // a second port and nobody else can pose as this receiver.
+        if let request = ingestor.retransmissionRequest(now: now),
+          let datagram = try? request.encoded(cipher: ingestor.requestCipher())
+        {
+          connection.send(content: datagram, completion: .idempotent)
+        }
       }
       if error == nil {
         receiveNext(on: connection)
@@ -318,6 +341,10 @@ final class NetworkAudioPacketIngestor {
   private var lastFrameCount = 0
   /// Built when the first compressed packet says which format and block length the sender chose.
   private var decoder: NetworkAudioCompressedDecoder?
+  private var asker = NetworkAudioRetransmissionAsker()
+  private var requestSequence: UInt64 = 0
+  private var retransmissionRequestCount: UInt64 = 0
+  private var retransmissionRecoveredCount: UInt64 = 0
   private var lastAcceptedTime: UInt64 = 0
 
   init(
@@ -431,6 +458,9 @@ final class NetworkAudioPacketIngestor {
     lastFrameCount = decodedFrameCount
     lastAcceptedTime = now
     increment(\Self.acceptedPacketCount)
+    if statisticsLock.withLock({ asker.noteArrival(sequence: packet.sequence, now: now) }) {
+      increment(\Self.retransmissionRecoveredCount)
+    }
     return .accepted(frameCount: decodedFrameCount)
   }
 
@@ -442,6 +472,8 @@ final class NetworkAudioPacketIngestor {
         foreignSessionPacketCount: foreignSessionPacketCount,
         stalePacketCount: stalePacketCount,
         missingPacketCount: missingPacketCount,
+        retransmissionRequestCount: retransmissionRequestCount,
+        retransmissionRecoveredCount: retransmissionRecoveredCount,
         frameBuffer: frameBuffer.statistics()
       )
     }
@@ -495,6 +527,39 @@ final class NetworkAudioPacketIngestor {
   /// Drops the decoder along with everything else the previous session left behind.
   private func resetDecoder() {
     decoder = nil
+    statisticsLock.withLock { asker.reset() }
+  }
+
+  /// The sequences worth asking the sender for, given what the queue is still holding.
+  ///
+  /// Empty whenever asking is switched off, whenever nothing is missing, and whenever the round
+  /// trip measured so far leaves no time to place an answer.
+  func retransmissionRequest(now: UInt64) -> NetworkAudioRetransmissionRequest? {
+    guard configuration.requestsRetransmission, let sessionID = activeSessionID else { return nil }
+    let missing = reorderBuffer.missingSequences(
+      limit: NetworkAudioRetransmissionRequest.maximumSequenceCount)
+    guard !missing.isEmpty else { return nil }
+    let queuedFrames = frameBuffer.statistics().availableFrameCount
+    let queued = Duration.nanoseconds(
+      Int64(Double(queuedFrames) / configuration.format.sampleRate * 1_000_000_000))
+    return statisticsLock.withLock { () -> NetworkAudioRetransmissionRequest? in
+      let wanted = asker.sequencesToAsk(missing: missing, queued: queued, now: now)
+      guard !wanted.isEmpty else { return nil }
+      let request = try? NetworkAudioRetransmissionRequest(
+        sessionID: sessionID,
+        sequence: requestSequence,
+        sequences: wanted
+      )
+      guard let request else { return nil }
+      requestSequence &+= 1
+      retransmissionRequestCount &+= UInt64(wanted.count)
+      return request
+    }
+  }
+
+  /// The cipher a request is sealed with, which is the one the active session uses.
+  func requestCipher() -> NetworkAudioSessionCipher? {
+    statisticsLock.withLock { cipher }
   }
 
   private func decodePayload(_ payload: Data) {

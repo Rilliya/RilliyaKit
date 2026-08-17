@@ -51,8 +51,13 @@ struct NetworkAudioRetransmissionRequestTests {
     let decoded = try NetworkAudioRetransmissionRequest.decode(datagram, cipher: cipher)
 
     #expect(decoded == request)
-    // The sequences asked for must not be readable without the key.
-    #expect(!datagram.dropFirst(NetworkAudioRetransmissionRequest.headerByteCount).contains(50))
+
+    // The sequences asked for must not be readable without the key: compare what is on the wire
+    // against the same request written in the clear.
+    let clear = try request.encoded()
+    let headerByteCount = NetworkAudioRetransmissionRequest.headerByteCount
+    #expect(datagram.dropFirst(headerByteCount) != clear.dropFirst(headerByteCount))
+    #expect(datagram.count == clear.count + NetworkAudioSessionCipher.tagByteCount)
   }
 
   /// Acting on a request in the clear while a key is configured would let anyone who can reach
@@ -223,5 +228,226 @@ struct NetworkAudioRetransmissionRequestTests {
         cipher: NetworkAudioSessionCipher(sharedKey: .random(), sessionID: Fixture.otherSessionID)
       )
     }
+  }
+}
+
+/// What a sender keeps, and how much it is willing to resend.
+@Suite("Network audio sender history")
+struct NetworkAudioSenderHistoryTests {
+  @Test("A recorded datagram is found again")
+  func recordedDatagramIsFound() {
+    let history = NetworkAudioSenderHistory(depth: 8, maximumDatagramByteCount: 64)
+    let bytes: [UInt8] = Array(0..<32)
+    bytes.withUnsafeBytes { history.record(sequence: 5, datagram: $0) }
+
+    var destination = [UInt8](repeating: 0, count: 64)
+    let length = destination.withUnsafeMutableBytes {
+      history.datagram(for: 5, into: $0)
+    }
+
+    #expect(length == 32)
+    #expect(Array(destination.prefix(32)) == bytes)
+  }
+
+  /// A packet older than the window is past any receiver's reach, so keeping it would be storage
+  /// spent on audio nobody can still place.
+  @Test("A datagram older than the window is gone")
+  func oldDatagramIsForgotten() {
+    let history = NetworkAudioSenderHistory(depth: 4, maximumDatagramByteCount: 64)
+    for sequence in UInt64(0)..<8 {
+      let bytes = [UInt8(sequence)]
+      bytes.withUnsafeBytes { history.record(sequence: sequence, datagram: $0) }
+    }
+
+    var destination = [UInt8](repeating: 0, count: 64)
+    let lengths = destination.withUnsafeMutableBytes { bytes in
+      [
+        history.datagram(for: 0, into: bytes),
+        history.datagram(for: 3, into: bytes),
+        history.datagram(for: 7, into: bytes),
+      ]
+    }
+
+    #expect(lengths[0] == nil)
+    #expect(lengths[1] == nil)
+    #expect(lengths[2] == 1)
+  }
+
+  @Test("A sequence never sent is not invented")
+  func unknownSequenceIsAbsent() {
+    let history = NetworkAudioSenderHistory(depth: 4, maximumDatagramByteCount: 64)
+    var destination = [UInt8](repeating: 0, count: 64)
+
+    let found = destination.withUnsafeMutableBytes { history.datagram(for: 99, into: $0) }
+    #expect(found == nil)
+  }
+
+  @Test("A new session keeps nothing from the last")
+  func resetForgetsEverything() {
+    let history = NetworkAudioSenderHistory(depth: 4, maximumDatagramByteCount: 64)
+    let bytes: [UInt8] = [1, 2, 3]
+    bytes.withUnsafeBytes { history.record(sequence: 1, datagram: $0) }
+    history.reset()
+
+    var destination = [UInt8](repeating: 0, count: 64)
+    let found = destination.withUnsafeMutableBytes { history.datagram(for: 1, into: $0) }
+    #expect(found == nil)
+  }
+
+  /// The ceiling is what keeps a stream of requests from turning retransmission into the larger
+  /// half of the flow.
+  @Test("Resending is capped at a share of what the sender already sends")
+  func budgetCapsTheRate() {
+    // A hundred packets a second, a quarter of which may be resent: twenty-five per second.
+    var budget = NetworkAudioRetransmissionBudget(packetsPerSecond: 100, fraction: 0.25)
+    let second: UInt64 = 1_000_000_000
+
+    // The burst is allowed at once, and then nothing until the bucket refills.
+    var allowed = 0
+    for _ in 0..<100 where budget.allows(now: 0) { allowed += 1 }
+    #expect(allowed == Int(NetworkAudioRetransmissionBudget.burst))
+
+    let exhausted = budget.allows(now: 0)
+    #expect(!exhausted)
+
+    // One second later the bucket has refilled to its burst, not to twenty-five.
+    var afterASecond = 0
+    for _ in 0..<100 where budget.allows(now: second) { afterASecond += 1 }
+    #expect(afterASecond == Int(NetworkAudioRetransmissionBudget.burst))
+  }
+
+  @Test("A sender sending nothing resends nothing")
+  func silentSenderSpendsNothing() {
+    var budget = NetworkAudioRetransmissionBudget(packetsPerSecond: 0)
+    for _ in 0..<Int(NetworkAudioRetransmissionBudget.burst) { _ = budget.allows(now: 0) }
+
+    let refilled = budget.allows(now: 10_000_000_000)
+    #expect(!refilled)
+  }
+}
+
+/// When asking is worth a datagram, and when it is not.
+@Suite("Network audio retransmission asking")
+struct NetworkAudioRetransmissionAskerTests {
+  private let second: UInt64 = 1_000_000_000
+
+  /// A queue deeper than the round trip has time to place an answer, so the gap is worth asking
+  /// about.
+  @Test("A gap is asked for when the queue has time for the answer")
+  func gapIsAskedForWhenThereIsTime() {
+    var asker = NetworkAudioRetransmissionAsker()
+
+    let wanted = asker.sequencesToAsk(
+      missing: [4, 5],
+      queued: .milliseconds(60),
+      now: 0
+    )
+
+    #expect(wanted == [4, 5])
+    #expect(asker.outstandingCount == 2)
+  }
+
+  /// A queue shallower than the round trip would receive the answer after the audio was due, so
+  /// the datagram would buy nothing.
+  @Test("A gap is not asked for when the answer would arrive too late")
+  func gapIsNotAskedForWithoutTime() {
+    var asker = NetworkAudioRetransmissionAsker()
+
+    let wanted = asker.sequencesToAsk(
+      missing: [4],
+      queued: .milliseconds(5),
+      now: 0
+    )
+
+    #expect(wanted.isEmpty)
+  }
+
+  /// A request lost on a link that lost the audio is likely lost for the same reason, so asking
+  /// again doubles the cost of one loss without improving the odds.
+  @Test("A sequence is asked for only once")
+  func sequenceIsAskedOnce() {
+    var asker = NetworkAudioRetransmissionAsker()
+
+    let first = asker.sequencesToAsk(missing: [7], queued: .milliseconds(60), now: 0)
+    let second = asker.sequencesToAsk(missing: [7], queued: .milliseconds(60), now: 1_000_000)
+
+    #expect(first == [7])
+    #expect(second.isEmpty)
+  }
+
+  @Test("No more are asked for than one request may name")
+  func requestCapIsHonoured() {
+    var asker = NetworkAudioRetransmissionAsker()
+    let missing = (0..<32).map(UInt64.init)
+
+    let wanted = asker.sequencesToAsk(missing: missing, queued: .milliseconds(200), now: 0)
+
+    #expect(wanted.count == NetworkAudioRetransmissionRequest.maximumSequenceCount)
+  }
+
+  /// Measuring rather than assuming is what lets a receiver on a slow link stop asking.
+  @Test("The round trip is measured from the answer")
+  func roundTripIsMeasured() {
+    var asker = NetworkAudioRetransmissionAsker()
+    _ = asker.sequencesToAsk(missing: [1], queued: .milliseconds(200), now: 0)
+
+    #expect(asker.roundTrip == nil)
+    let answered = asker.noteArrival(sequence: 1, now: 20_000_000)
+
+    #expect(answered)
+    #expect(asker.roundTrip == .milliseconds(20))
+    #expect(asker.outstandingCount == 0)
+  }
+
+  @Test("A packet nobody asked for does not count as an answer")
+  func unaskedArrivalIsNotAnAnswer() {
+    var asker = NetworkAudioRetransmissionAsker()
+
+    let answered = asker.noteArrival(sequence: 99, now: 1_000)
+
+    #expect(!answered)
+    #expect(asker.roundTrip == nil)
+  }
+
+  /// This is the property that matters on a tunnel: once the answer cannot arrive in time, the
+  /// receiver stops spending datagrams on it.
+  @Test("A measured round trip longer than the queue stops the asking")
+  func slowLinkStopsAsking() {
+    var asker = NetworkAudioRetransmissionAsker()
+    _ = asker.sequencesToAsk(missing: [1], queued: .milliseconds(200), now: 0)
+    asker.noteArrival(sequence: 1, now: 80_000_000)
+
+    // Eighty milliseconds there and back against a queue holding sixty.
+    let wanted = asker.sequencesToAsk(missing: [2], queued: .milliseconds(60), now: second)
+
+    #expect(wanted.isEmpty)
+  }
+
+  @Test("A new session asks afresh")
+  func resetForgetsTheSession() {
+    var asker = NetworkAudioRetransmissionAsker()
+    _ = asker.sequencesToAsk(missing: [3], queued: .milliseconds(60), now: 0)
+
+    asker.reset()
+
+    #expect(asker.roundTrip == nil)
+    #expect(asker.outstandingCount == 0)
+    let afresh = asker.sequencesToAsk(missing: [3], queued: .milliseconds(60), now: 0)
+    #expect(afresh == [3])
+  }
+
+  /// A stream running for hours must not accumulate one entry per packet ever sent.
+  @Test("What has been asked for is forgotten as the stream moves on")
+  func memoryIsBounded() {
+    var asker = NetworkAudioRetransmissionAsker(memory: 64)
+
+    for sequence in stride(from: UInt64(0), to: 2_000, by: 1) {
+      _ = asker.sequencesToAsk(missing: [sequence], queued: .milliseconds(200), now: 0)
+    }
+
+    // Long-passed sequences are forgotten, so an old one would be asked for again rather than
+    // being remembered forever.
+    let forgotten = asker.sequencesToAsk(missing: [1], queued: .milliseconds(200), now: 0)
+    #expect(forgotten == [1])
   }
 }

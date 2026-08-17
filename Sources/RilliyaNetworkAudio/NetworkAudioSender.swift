@@ -7,6 +7,15 @@ import RilliyaRealtime
 
 /// Bounded controls for one direct UDP network-audio sender.
 public struct NetworkAudioSenderConfiguration: Equatable, Hashable, Sendable {
+  /// The recent packets a sender keeps by default.
+  ///
+  /// Enough to answer for a round trip plus the window a receiver reorders over, which at ten
+  /// milliseconds a packet is about half a second of history.
+  public static let defaultRetransmissionDepth = 48
+
+  /// The deepest history a sender will keep.
+  public static let maximumRetransmissionDepth = 512
+
   /// The bit rate Opus is asked for when nothing else is said.
   ///
   /// Measured here, this leaves stereo at 48 kHz costing about a twentieth of what the samples
@@ -43,6 +52,12 @@ public struct NetworkAudioSenderConfiguration: Equatable, Hashable, Sendable {
   /// The bits per second Opus is asked for, which the uncompressed encoding ignores.
   public let opusBitRate: Int
 
+  /// How many recent packets are kept so a receiver can ask for one again.
+  ///
+  /// Zero keeps none and answers nothing, which is what a sender on a link that loses nothing
+  /// wants. The default covers a round trip and a reorder window on a tunnel.
+  public let retransmissionDepth: Int
+
   /// The frames each datagram carries.
   ///
   /// Matching the producer's render quantum keeps one rendered block in one datagram; leaving it
@@ -60,6 +75,7 @@ public struct NetworkAudioSenderConfiguration: Equatable, Hashable, Sendable {
     framesPerPacket: Int? = nil,
     encoding: NetworkAudioWireEncoding = .interleavedFloat32,
     opusBitRate: Int = NetworkAudioSenderConfiguration.defaultOpusBitRate,
+    retransmissionDepth: Int = NetworkAudioSenderConfiguration.defaultRetransmissionDepth,
     sharedKey: NetworkAudioSharedKey? = nil
   ) throws {
     let normalizedHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -87,8 +103,12 @@ public struct NetworkAudioSenderConfiguration: Equatable, Hashable, Sendable {
     self.sessionID = sessionID
     self.capacityFrameCount = capacityFrameCount
     self.maximumDatagramByteCount = maximumDatagramByteCount
+    guard (0...Self.maximumRetransmissionDepth).contains(retransmissionDepth) else {
+      throw NetworkAudioSenderError.invalidRetransmissionDepth
+    }
     self.encoding = encoding
     self.opusBitRate = opusBitRate
+    self.retransmissionDepth = retransmissionDepth
     self.sharedKey = sharedKey
     let payloadRoom =
       maximumDatagramByteCount - NetworkAudioPacketCodec.headerByteCount
@@ -195,6 +215,9 @@ public enum NetworkAudioSenderError: Error, Equatable, LocalizedError, Sendable 
   /// The chosen wire format cannot carry what this sender was asked to carry.
   case codec(NetworkAudioCodecError)
 
+  /// The retransmission history is outside the bounded policy.
+  case invalidRetransmissionDepth
+
   /// Packet encoding rejected internally produced metadata.
   case packet(NetworkAudioPacketError)
 
@@ -207,6 +230,8 @@ public enum NetworkAudioSenderError: Error, Equatable, LocalizedError, Sendable 
       "The network audio destination port must be between 1 and 65,535."
     case .codec(let error):
       error.errorDescription
+    case .invalidRetransmissionDepth:
+      "The network audio retransmission history must be between 0 and 512 packets."
     case .invalidDatagramBound:
       "The network audio packet bound must fit one complete frame and remain below 16,384 bytes."
     case .invalidBufferCapacity:
@@ -358,6 +383,9 @@ public final class NetworkAudioSender: @unchecked Sendable {
       packets.emit(through: connection)
       return .continue
     }
+    if configuration.retransmissionDepth > 0 {
+      Self.receiveRequest(on: connection, answeredBy: packets)
+    }
     do {
       try worker.start()
     } catch {
@@ -367,6 +395,24 @@ public final class NetworkAudioSender: @unchecked Sendable {
     }
     self.worker = worker
     state = .running
+  }
+
+  /// Listens for retransmission requests on the flow the audio goes out on.
+  ///
+  /// The reply travels back along that same flow, so a request can only come from whoever holds
+  /// its addresses; a datagram from anywhere else never reaches this at all.
+  private static func receiveRequest(
+    on connection: NWConnection,
+    answeredBy packets: NetworkAudioSenderPacketizer
+  ) {
+    connection.receiveMessage { [weak connection] content, _, _, error in
+      guard let connection else { return }
+      if let content, let request = packets.decodeRequest(content) {
+        packets.answer(request, through: connection)
+      }
+      guard error == nil else { return }
+      receiveRequest(on: connection, answeredBy: packets)
+    }
   }
 
   /// Stops the worker and cancels network IO.
@@ -401,6 +447,8 @@ private final class NetworkAudioSenderPacketizer: @unchecked Sendable {
   private let datagram: UnsafeMutableRawBufferPointer
   private let cipher: NetworkAudioSessionCipher?
   private let compression: CompressionStaging?
+  private let history: NetworkAudioSenderHistory?
+  private var budget: NetworkAudioRetransmissionBudget
   private var sequence: UInt64 = 0
 
   /// What compressing a block needs beyond the planar channels already read.
@@ -441,6 +489,15 @@ private final class NetworkAudioSenderPacketizer: @unchecked Sendable {
       alignment: MemoryLayout<UInt64>.alignment
     )
     compression = Self.staging(for: configuration)
+    history =
+      configuration.retransmissionDepth > 0
+      ? NetworkAudioSenderHistory(
+        depth: configuration.retransmissionDepth,
+        maximumDatagramByteCount: configuration.maximumDatagramByteCount
+      ) : nil
+    budget = NetworkAudioRetransmissionBudget(
+      packetsPerSecond: configuration.format.sampleRate / Double(configuration.framesPerPacket)
+    )
   }
 
   deinit {
@@ -513,11 +570,41 @@ private final class NetworkAudioSenderPacketizer: @unchecked Sendable {
       return
     }
     guard written > 0, let base = datagram.baseAddress else { return }
+    history?.record(
+      sequence: sequence,
+      datagram: UnsafeRawBufferPointer(start: base, count: written)
+    )
     sequence &+= 1
     connection.send(
       content: Data(bytes: base, count: written),
       completion: .idempotent
     )
+  }
+
+  /// Sends again whatever a request names and this sender still holds.
+  ///
+  /// A request naming another session asks for audio that no longer exists, and the budget is
+  /// what keeps a stream of requests from turning retransmission into the larger half of the flow.
+  func answer(_ request: NetworkAudioRetransmissionRequest, through connection: NWConnection) {
+    guard let history, request.sessionID == configuration.sessionID else { return }
+    let now = DispatchTime.now().uptimeNanoseconds
+    for wanted in request.sequences {
+      guard budget.allows(now: now) else { return }
+      guard let length = history.datagram(for: wanted, into: datagram),
+        let base = datagram.baseAddress
+      else { continue }
+      connection.send(
+        content: Data(bytes: base, count: length),
+        completion: .idempotent
+      )
+    }
+  }
+
+  /// Reads a request from the flow the audio goes out on.
+  ///
+  /// Only that flow is listened to, so a datagram from anywhere else never reaches this.
+  func decodeRequest(_ data: Data) -> NetworkAudioRetransmissionRequest? {
+    try? NetworkAudioRetransmissionRequest.decode(data, cipher: cipher)
   }
 
   /// Weaves the channels together, compresses them, and writes the datagram.
