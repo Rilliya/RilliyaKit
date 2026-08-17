@@ -61,6 +61,12 @@ public struct NetworkAudioReceiverConfiguration: Sendable {
   /// latency; sharing one would make every destination's timing everyone else's problem.
   public let maximumDestinationCount: Int
 
+  /// The destinations a stream is given room for when the caller does not say.
+  ///
+  /// Enough that rebuilding a graph, which briefly holds the old destinations and the new ones at
+  /// once, does not run out.
+  public static let preferredDestinationCount = 8
+
   /// Creates validated receiver controls with bounded packet and PCM storage.
   public init(
     port: UInt16,
@@ -73,7 +79,7 @@ public struct NetworkAudioReceiverConfiguration: Sendable {
     reorderDepth: Int = 8,
     requestsRetransmission: Bool = true,
     waveformUpdatesPerSecond: Int = AudioWaveformMeter.defaultUpdatesPerSecond,
-    maximumDestinationCount: Int = 8,
+    maximumDestinationCount: Int? = nil,
     keyProvider: (any NetworkAudioKeyProvider)? = nil
   ) throws {
     guard port > 0 else { throw NetworkAudioReceiverError.invalidPort }
@@ -97,9 +103,18 @@ public struct NetworkAudioReceiverConfiguration: Sendable {
     guard (1...Self.maximumReorderDepth).contains(reorderDepth) else {
       throw NetworkAudioReceiverError.invalidReorderDepth
     }
+    // Every destination is preallocated, so a wide format affords fewer of them. Asking for more
+    // than the storage bound allows would refuse the stream outright, and a stream that plays to
+    // one place is worth more than one that refuses to play at all.
+    let affordableDestinationCount =
+      AudioRealtimeFrameDistributor.maximumAggregateSampleCapacity
+      / max(1, format.channelCount * capacityFrameCount)
+    let resolvedDestinationCount =
+      maximumDestinationCount
+      ?? max(1, min(Self.preferredDestinationCount, affordableDestinationCount))
     guard
       (1...AudioRealtimeFrameDistributor.maximumSubscriberCountLimit)
-        .contains(maximumDestinationCount)
+        .contains(resolvedDestinationCount)
     else {
       throw NetworkAudioReceiverError.invalidDestinationCount
     }
@@ -112,7 +127,7 @@ public struct NetworkAudioReceiverConfiguration: Sendable {
     self.reorderDepth = reorderDepth
     self.requestsRetransmission = requestsRetransmission
     self.waveformUpdatesPerSecond = waveformUpdatesPerSecond
-    self.maximumDestinationCount = maximumDestinationCount
+    self.maximumDestinationCount = resolvedDestinationCount
     self.keyProvider = keyProvider
   }
 }

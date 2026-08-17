@@ -119,6 +119,26 @@ struct NetworkAudioFanOutTests {
     #expect(receiver.statistics().destinationCount == 0)
   }
 
+  /// A stream too wide to preallocate eight destinations for still plays to one.
+  ///
+  /// Every destination is preallocated, so a wide format affords fewer of them. Refusing the
+  /// stream outright would trade a working single destination for none at all.
+  @Test("A stream too wide for the usual destination count still starts")
+  func aWideStreamStillStarts() throws {
+    let wide = try NetworkAudioStreamFormat(sampleRate: 48_000, channelCount: 64)
+    let receiver = try NetworkAudioReceiver(
+      configuration: try NetworkAudioReceiverConfiguration(port: 49_805, format: wide)
+    )
+
+    #expect(receiver.configuration.maximumDestinationCount >= 1)
+    #expect(
+      receiver.configuration.maximumDestinationCount
+        < NetworkAudioReceiverConfiguration.preferredDestinationCount,
+      "a 64-channel stream should not have been given the usual number of destinations"
+    )
+    _ = try receiver.subscribeWithJitterBuffer()
+  }
+
   private static func feed(_ sender: NetworkAudioSender) async throws {
     var left = [Float](repeating: level, count: quantumCount)
     var right = [Float](repeating: level, count: quantumCount)
