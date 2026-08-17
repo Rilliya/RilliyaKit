@@ -61,7 +61,43 @@ public enum NetworkAudioWireEncoding: UInt8, Equatable, Hashable, Sendable, Case
   }
 }
 
+/// Which piece of a split block a datagram carries.
+public struct NetworkAudioPacketFragment: Equatable, Hashable, Sendable {
+  /// This piece's place in the block, counted from zero.
+  public let index: Int
+
+  /// How many pieces the block was split into.
+  public let count: Int
+
+  /// The most pieces one block may be split into.
+  ///
+  /// A block is lost entirely if any of its pieces is, so the ceiling is what stops a codec
+  /// choosing a block so wide that ordinary loss takes all of it.
+  public static let maximumCount = 64
+
+  /// The bytes a fragmented datagram carries beyond the fixed header.
+  public static let headerByteCount = 4
+
+  /// Creates a place, refusing one no block could have.
+  public init(index: Int, count: Int) throws {
+    guard count >= 1, count <= Self.maximumCount else {
+      throw NetworkAudioPacketError.invalidFragment(index: index, count: count)
+    }
+    guard index >= 0, index < count else {
+      throw NetworkAudioPacketError.invalidFragment(index: index, count: count)
+    }
+    self.index = index
+    self.count = count
+  }
+
+  /// Whether this is the last piece of its block.
+  public var isLast: Bool { index == count - 1 }
+}
+
 /// A validated version-1 datagram.
+///
+/// Carries either one whole block of audio or, when the flag says so, one piece of a block too
+/// wide for a single datagram.
 public struct NetworkAudioPacket: Equatable, Sendable {
   /// The sender session that owns the monotonically increasing sequence.
   public let sessionID: UUID
@@ -81,6 +117,12 @@ public struct NetworkAudioPacket: Equatable, Sendable {
   /// The payload, as ``encoding`` describes it.
   public let payload: Data
 
+  /// Which piece of a block this packet carries, when the block did not fit in one datagram.
+  ///
+  /// A compressed block can be wider than any datagram — a lossless one is about twenty of them —
+  /// so it is split across consecutive sequences and put back together before it is decoded.
+  public let fragment: NetworkAudioPacketFragment?
+
   /// The sender's codec configuration, when this packet is one of those carrying it.
   ///
   /// A codec that needs one produces nothing until it arrives, so a sender repeats it rather
@@ -95,17 +137,20 @@ public struct NetworkAudioPacket: Equatable, Sendable {
     frameCount: Int,
     payload: Data,
     encoding: NetworkAudioWireEncoding = .interleavedFloat32,
-    codecConfiguration: Data = Data()
+    codecConfiguration: Data = Data(),
+    fragment: NetworkAudioPacketFragment? = nil
   ) throws {
     guard frameCount > 0 else {
       throw NetworkAudioPacketError.invalidFrameCount(frameCount)
     }
+    // A fragment carries part of a block, so its size says nothing about what the block holds.
     guard
-      encoding.carries(
-        payloadByteCount: payload.count,
-        channelCount: format.channelCount,
-        frameCount: frameCount
-      )
+      fragment != nil
+        || encoding.carries(
+          payloadByteCount: payload.count,
+          channelCount: format.channelCount,
+          frameCount: frameCount
+        )
     else {
       let expected =
         encoding == .interleavedFloat32
@@ -130,6 +175,7 @@ public struct NetworkAudioPacket: Equatable, Sendable {
     self.payload = payload
     self.encoding = encoding
     self.codecConfiguration = codecConfiguration
+    self.fragment = fragment
   }
 
   private static func payloadByteCount(channelCount: Int, frameCount: Int) throws -> Int {
@@ -179,6 +225,9 @@ public enum NetworkAudioPacketError: Error, Equatable, LocalizedError, Sendable 
   /// The complete datagram exceeds the protocol's defensive limit.
   case datagramTooLarge
 
+  /// The datagram claims a piece of a block that cannot exist.
+  case invalidFragment(index: Int, count: Int)
+
   /// A human-readable explanation suitable for diagnostics.
   public var errorDescription: String? {
     switch self {
@@ -200,6 +249,8 @@ public enum NetworkAudioPacketError: Error, Equatable, LocalizedError, Sendable 
       "The network audio datagram is incomplete."
     case .payloadSizeMismatch(let expected, let actual):
       "The network audio payload contains \(actual) bytes instead of \(expected)."
+    case .invalidFragment(let index, let count):
+      "A datagram claims piece \(index) of \(count), which is not a piece of any block."
     case .datagramTooLarge:
       "The network audio datagram exceeds the bounded protocol size."
     }
@@ -223,6 +274,12 @@ public enum NetworkAudioPacketCodec {
 
   /// Set when the payload is sealed and an authentication tag follows it.
   public static let encryptedFlag: UInt16 = 0x0001
+
+  /// Set when this datagram carries one piece of a block rather than the whole of it.
+  public static let fragmentedFlag: UInt16 = 0x0002
+
+  /// Every flag this build understands; anything else is refused rather than ignored.
+  static let knownFlags: UInt16 = encryptedFlag | fragmentedFlag
 
   private static let magic: UInt32 = 0x524C_5941  // RLYA
 
@@ -370,10 +427,11 @@ public enum NetworkAudioPacketCodec {
       throw NetworkAudioPacketError.unsupportedEncoding(encodingValue)
     }
     let flags = try cursor.readInteger(as: UInt16.self)
-    guard flags & ~encryptedFlag == 0 else {
+    guard flags & ~knownFlags == 0 else {
       throw NetworkAudioPacketError.unsupportedFlags(flags)
     }
     let isEncrypted = flags & encryptedFlag != 0
+    let isFragmented = flags & fragmentedFlag != 0
     guard !isEncrypted || cipher != nil else {
       throw NetworkAudioSecurityError.encryptionRequired
     }
@@ -399,18 +457,31 @@ public enum NetworkAudioPacketCodec {
     guard frameCount > 0 else {
       throw NetworkAudioPacketError.invalidFrameCount(frameCount)
     }
+    var fragment: NetworkAudioPacketFragment?
+    if isFragmented {
+      let index = Int(try cursor.readInteger(as: UInt16.self))
+      let count = Int(try cursor.readInteger(as: UInt16.self))
+      fragment = try NetworkAudioPacketFragment(index: index, count: count)
+    }
+    // A fragment carries part of a block, so its size says nothing about what the block holds.
     guard
-      encoding.carries(
-        payloadByteCount: payloadByteCount,
-        channelCount: channelCount,
-        frameCount: frameCount
-      )
+      isFragmented
+        || encoding.carries(
+          payloadByteCount: payloadByteCount,
+          channelCount: channelCount,
+          frameCount: frameCount
+        )
     else {
       throw NetworkAudioPacketError.payloadSizeMismatch(
         expected: 0,
         actual: payloadByteCount
       )
     }
+    guard payloadByteCount <= maximumPayloadByteCount else {
+      throw NetworkAudioPacketError.datagramTooLarge
+    }
+    let authenticatedByteCount =
+      headerByteCount + (isFragmented ? NetworkAudioPacketFragment.headerByteCount : 0)
     let tagByteCount = isEncrypted ? NetworkAudioSessionCipher.tagByteCount : 0
     let sealedByteCount = payloadByteCount + configurationByteCount
     guard cursor.remainingByteCount == sealedByteCount + tagByteCount else {
@@ -428,7 +499,7 @@ public enum NetworkAudioPacketCodec {
     if let cipher {
       let tag = try cursor.readData(byteCount: tagByteCount)
       try sealed.withUnsafeMutableBytes { plaintext in
-        try data.prefix(headerByteCount).withUnsafeBytes { header in
+        try data.prefix(authenticatedByteCount).withUnsafeBytes { header in
           try tag.withUnsafeBytes { tagBytes in
             try cipher.open(
               payload: plaintext,
@@ -447,7 +518,8 @@ public enum NetworkAudioPacketCodec {
       frameCount: frameCount,
       payload: sealed.prefix(payloadByteCount),
       encoding: encoding,
-      codecConfiguration: Data(sealed.dropFirst(payloadByteCount))
+      codecConfiguration: Data(sealed.dropFirst(payloadByteCount)),
+      fragment: fragment
     )
   }
 
@@ -465,27 +537,32 @@ public enum NetworkAudioPacketCodec {
     encoding: NetworkAudioWireEncoding,
     payload: UnsafeRawBufferPointer,
     codecConfiguration: Data = Data(),
+    fragment: NetworkAudioPacketFragment? = nil,
     into destination: UnsafeMutableRawBufferPointer,
     cipher: NetworkAudioSessionCipher? = nil
   ) throws -> Int {
     guard frameCount > 0, frameCount <= Int(UInt16.max) else {
       throw NetworkAudioPacketError.invalidFrameCount(frameCount)
     }
+    // A fragment carries part of a block, so its size says nothing about what the block holds.
     guard
-      encoding.carries(
-        payloadByteCount: payload.count,
-        channelCount: format.channelCount,
-        frameCount: frameCount
-      ), let source = payload.baseAddress
+      fragment != nil
+        || encoding.carries(
+          payloadByteCount: payload.count,
+          channelCount: format.channelCount,
+          frameCount: frameCount
+        ), let source = payload.baseAddress
     else {
       throw NetworkAudioPacketError.payloadSizeMismatch(expected: 0, actual: payload.count)
     }
     guard codecConfiguration.count <= NetworkAudioCodec.maximumConfigurationByteCount else {
       throw NetworkAudioPacketError.datagramTooLarge
     }
+    let fragmentByteCount = fragment == nil ? 0 : NetworkAudioPacketFragment.headerByteCount
     let tagByteCount = cipher == nil ? 0 : NetworkAudioSessionCipher.tagByteCount
     let datagramByteCount =
-      headerByteCount + payload.count + codecConfiguration.count + tagByteCount
+      headerByteCount + fragmentByteCount + payload.count + codecConfiguration.count
+      + tagByteCount
     guard datagramByteCount <= maximumDatagramByteCount,
       destination.count >= datagramByteCount,
       let base = destination.baseAddress
@@ -493,11 +570,13 @@ public enum NetworkAudioPacketCodec {
       throw NetworkAudioPacketError.datagramTooLarge
     }
 
+    var flags = cipher == nil ? UInt16(0) : encryptedFlag
+    if fragment != nil { flags |= fragmentedFlag }
     var cursor = DatagramWriter(destination: destination)
     cursor.appendInteger(magic)
     cursor.appendByte(version)
     cursor.appendByte(encoding.rawValue)
-    cursor.appendInteger(cipher == nil ? UInt16(0) : encryptedFlag)
+    cursor.appendInteger(flags)
     withUnsafeBytes(of: sessionID.uuid) { cursor.appendBytes($0) }
     cursor.appendInteger(sequence)
     cursor.appendInteger(UInt32(format.sampleRate.rounded()))
@@ -505,26 +584,34 @@ public enum NetworkAudioPacketCodec {
     cursor.appendInteger(UInt16(frameCount))
     cursor.appendInteger(UInt32(payload.count))
     cursor.appendInteger(UInt32(codecConfiguration.count))
+    // A datagram carrying a whole block writes none of this, so it is byte for byte what it was.
+    if let fragment {
+      cursor.appendInteger(UInt16(fragment.index))
+      cursor.appendInteger(UInt16(fragment.count))
+    }
 
-    base.advanced(by: headerByteCount).copyMemory(from: source, byteCount: payload.count)
+    let bodyOffset = headerByteCount + fragmentByteCount
+    base.advanced(by: bodyOffset).copyMemory(from: source, byteCount: payload.count)
     // The configuration follows the payload, so the payload's offset stays a constant.
     if !codecConfiguration.isEmpty {
       codecConfiguration.withUnsafeBytes { bytes in
         guard let start = bytes.baseAddress else { return }
-        base.advanced(by: headerByteCount + payload.count)
+        base.advanced(by: bodyOffset + payload.count)
           .copyMemory(from: start, byteCount: codecConfiguration.count)
       }
     }
     guard let cipher else { return datagramByteCount }
+    // The fragment's place in its block sits inside what the tag covers, so a sealed stream
+    // cannot be told a piece belongs somewhere else.
     let sealed = try cipher.seal(
       payload: UnsafeMutableRawBufferPointer(
-        start: base.advanced(by: headerByteCount),
+        start: base.advanced(by: bodyOffset),
         count: payload.count + codecConfiguration.count
       ),
       sequence: sequence,
-      authenticating: UnsafeRawBufferPointer(start: base, count: headerByteCount)
+      authenticating: UnsafeRawBufferPointer(start: base, count: bodyOffset)
     )
-    return headerByteCount + sealed
+    return bodyOffset + sealed
   }
 }
 
