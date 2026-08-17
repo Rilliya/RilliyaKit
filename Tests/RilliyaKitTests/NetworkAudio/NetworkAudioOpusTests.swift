@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import Foundation
+import RilliyaRealtime
 import Testing
 
 @testable import RilliyaNetworkAudio
@@ -244,5 +245,170 @@ struct NetworkAudioOpusRoundTripTests {
       let period = (last - first) / Double(crossings.count - 1)
       return period > 0 ? Fixture.sampleRate / period : 0
     }
+  }
+}
+
+/// The wire has to carry a compressed payload as readily as an uncompressed one, including under
+/// a key: the header it is authenticated against says which of the two it is.
+@Suite("Network audio Opus on the wire")
+struct NetworkAudioOpusWireTests {
+  private enum Fixture {
+    static let sampleRate = 48_000.0
+    static let channelCount = 2
+    static let frameCount = 480
+    static let sessionID = UUID(
+      uuid: (
+        0x0A, 0x1B, 0x2C, 0x3D, 0x4E, 0x5F, 0x40, 0x81,
+        0x92, 0xA3, 0xB4, 0xC5, 0xD6, 0xE7, 0xF8, 0x09
+      )
+    )
+  }
+
+  @Test("A compressed datagram round-trips through the codec")
+  func compressedDatagramRoundTrips() throws {
+    let payload = Data((0..<200).map { UInt8($0 % 251) })
+
+    let datagram = try encode(payload: payload, key: nil)
+    let decoded = try NetworkAudioPacketCodec.decode(datagram)
+
+    #expect(decoded.encoding == .opus)
+    #expect(decoded.payload == payload)
+    #expect(decoded.frameCount == Fixture.frameCount)
+    #expect(decoded.format.sampleRate == Fixture.sampleRate)
+  }
+
+  @Test("A compressed datagram round-trips under a key")
+  func compressedDatagramRoundTripsEncrypted() throws {
+    let key = NetworkAudioSharedKey.random()
+    let payload = Data((0..<173).map { UInt8($0 % 251) })
+
+    let datagram = try encode(payload: payload, key: key)
+    let cipher = NetworkAudioSessionCipher(sharedKey: key, sessionID: Fixture.sessionID)
+    let decoded = try NetworkAudioPacketCodec.decode(datagram, cipher: cipher)
+
+    #expect(decoded.encoding == .opus)
+    #expect(decoded.payload == payload)
+    // The compressed bytes must not be readable without the key.
+    #expect(!datagram.dropFirst(NetworkAudioPacketCodec.headerByteCount).starts(with: payload))
+  }
+
+  /// The encoding is part of what the tag covers, so flipping it is a forgery, not a fallback.
+  @Test("Changing the declared encoding of a sealed datagram is refused")
+  func encodingIsAuthenticated() throws {
+    let key = NetworkAudioSharedKey.random()
+    var datagram = try encode(payload: Data((0..<64).map { UInt8($0) }), key: key)
+
+    // Byte five of the header is the encoding.
+    datagram[5] = NetworkAudioWireEncoding.interleavedFloat32.rawValue
+
+    let cipher = NetworkAudioSessionCipher(sharedKey: key, sessionID: Fixture.sessionID)
+    #expect(throws: (any Error).self) {
+      _ = try NetworkAudioPacketCodec.decode(datagram, cipher: cipher)
+    }
+  }
+
+  @Test("A payload no Opus packet could be is refused")
+  func impossiblePayloadIsRefused() throws {
+    #expect(throws: (any Error).self) {
+      _ = try encode(payload: Data(), key: nil)
+    }
+    #expect(throws: (any Error).self) {
+      _ = try encode(
+        payload: Data(count: NetworkAudioOpus.maximumPacketByteCount + 1),
+        key: nil
+      )
+    }
+  }
+
+  /// Every packet the ingestor is handed has to reach the queue as audio, which is the whole
+  /// path a receiver runs.
+  @Test("A compressed stream reaches the receiver's queue as audio")
+  func compressedStreamReachesTheQueue() throws {
+    let format = try NetworkAudioStreamFormat(
+      sampleRate: Fixture.sampleRate,
+      channelCount: Fixture.channelCount
+    )
+    let frameBuffer = try AudioRealtimeFrameBuffer(
+      format: AudioProcessingFormat(
+        sampleRate: Fixture.sampleRate,
+        channelCount: Fixture.channelCount
+      ),
+      capacityFrameCount: 32_768
+    )
+    let ingestor = try NetworkAudioPacketIngestor(
+      configuration: NetworkAudioReceiverConfiguration(
+        port: 49_999,
+        format: format,
+        capacityFrameCount: 32_768
+      ),
+      frameBuffer: frameBuffer
+    )
+    let encoder = try NetworkAudioOpusEncoder(
+      sampleRate: Fixture.sampleRate,
+      channelCount: Fixture.channelCount,
+      frameCountPerPacket: Fixture.frameCount,
+      bitRate: 128_000
+    )
+    let samples = UnsafeMutablePointer<Float>.allocate(
+      capacity: Fixture.frameCount * Fixture.channelCount)
+    let packet = UnsafeMutableRawBufferPointer.allocate(byteCount: 4_000, alignment: 16)
+    defer {
+      samples.deallocate()
+      packet.deallocate()
+    }
+
+    var accepted = 0
+    for block in 0..<20 {
+      for frame in 0..<Fixture.frameCount {
+        let position = block * Fixture.frameCount + frame
+        let value = Float(0.25 * sin(2 * .pi * 440 * Double(position) / Fixture.sampleRate))
+        for channel in 0..<Fixture.channelCount {
+          samples[frame * Fixture.channelCount + channel] = value
+        }
+      }
+      let byteCount = try encoder.encode(input: samples, into: packet)
+      let datagram = try encode(
+        payload: Data(UnsafeRawBufferPointer(rebasing: packet[..<byteCount])),
+        key: nil,
+        sequence: UInt64(block)
+      )
+      if case .accepted = ingestor.ingest(datagram, now: UInt64(block) * 10_000_000) {
+        accepted += 1
+      }
+    }
+
+    #expect(accepted == 20)
+    let statistics = ingestor.statistics()
+    #expect(statistics.rejectedPacketCount == 0)
+    // Every block but the decoder's first reaches the queue in full.
+    #expect(statistics.frameBuffer.writtenFrameCount > UInt64(Fixture.frameCount * 18))
+  }
+
+  private func encode(
+    payload: Data,
+    key: NetworkAudioSharedKey?,
+    sequence: UInt64 = 0
+  ) throws -> Data {
+    let format = try NetworkAudioStreamFormat(
+      sampleRate: Fixture.sampleRate,
+      channelCount: Fixture.channelCount
+    )
+    let cipher = key.map { NetworkAudioSessionCipher(sharedKey: $0, sessionID: Fixture.sessionID) }
+    var datagram = Data(count: NetworkAudioPacketCodec.maximumDatagramByteCount)
+    let written = try payload.withUnsafeBytes { source in
+      try datagram.withUnsafeMutableBytes { destination in
+        try NetworkAudioPacketCodec.encode(
+          sessionID: Fixture.sessionID,
+          sequence: sequence,
+          format: format,
+          frameCount: Fixture.frameCount,
+          encoding: .opus,
+          payload: source,
+          into: destination,
+          cipher: cipher
+        )
+      }
+    }
+    return datagram.prefix(written)
   }
 }

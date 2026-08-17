@@ -7,6 +7,12 @@ import RilliyaRealtime
 
 /// Bounded controls for one direct UDP network-audio sender.
 public struct NetworkAudioSenderConfiguration: Equatable, Hashable, Sendable {
+  /// The bit rate Opus is asked for when nothing else is said.
+  ///
+  /// Measured here, this leaves stereo at 48 kHz costing about a twentieth of what the samples
+  /// themselves would, at a quality no listener has to accept anything for.
+  public static let defaultOpusBitRate = 128_000
+
   /// A conservative datagram size that avoids fragmentation on ordinary local networks.
   public static let defaultMaximumDatagramByteCount = 1_200
 
@@ -31,6 +37,12 @@ public struct NetworkAudioSenderConfiguration: Equatable, Hashable, Sendable {
   /// The key both peers share, or `nil` to send in the clear.
   public let sharedKey: NetworkAudioSharedKey?
 
+  /// How the payload is represented on the wire.
+  public let encoding: NetworkAudioWireEncoding
+
+  /// The bits per second Opus is asked for, which the uncompressed encoding ignores.
+  public let opusBitRate: Int
+
   /// The frames each datagram carries.
   ///
   /// Matching the producer's render quantum keeps one rendered block in one datagram; leaving it
@@ -46,6 +58,8 @@ public struct NetworkAudioSenderConfiguration: Equatable, Hashable, Sendable {
     capacityFrameCount: Int = 16_384,
     maximumDatagramByteCount: Int = defaultMaximumDatagramByteCount,
     framesPerPacket: Int? = nil,
+    encoding: NetworkAudioWireEncoding = .interleavedFloat32,
+    opusBitRate: Int = NetworkAudioSenderConfiguration.defaultOpusBitRate,
     sharedKey: NetworkAudioSharedKey? = nil
   ) throws {
     let normalizedHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -73,22 +87,69 @@ public struct NetworkAudioSenderConfiguration: Equatable, Hashable, Sendable {
     self.sessionID = sessionID
     self.capacityFrameCount = capacityFrameCount
     self.maximumDatagramByteCount = maximumDatagramByteCount
+    self.encoding = encoding
+    self.opusBitRate = opusBitRate
     self.sharedKey = sharedKey
-    let maximumFrames =
-      (maximumDatagramByteCount - NetworkAudioPacketCodec.headerByteCount
-        - (sharedKey == nil ? 0 : NetworkAudioSessionCipher.tagByteCount))
-      / format.channelCount / MemoryLayout<Float>.stride
-    guard maximumFrames >= 1 else { throw NetworkAudioSenderError.invalidDatagramBound }
-    if let framesPerPacket {
-      guard (1...maximumFrames).contains(framesPerPacket),
-        framesPerPacket <= capacityFrameCount
-      else {
-        throw NetworkAudioSenderError.invalidPacketFrameCount(framesPerPacket)
+    let payloadRoom =
+      maximumDatagramByteCount - NetworkAudioPacketCodec.headerByteCount
+      - (sharedKey == nil ? 0 : NetworkAudioSessionCipher.tagByteCount)
+    guard payloadRoom >= 1 else { throw NetworkAudioSenderError.invalidDatagramBound }
+
+    switch encoding {
+    case .interleavedFloat32:
+      // Every frame costs its own bytes, so the block is what the datagram has room for.
+      let maximumFrames = payloadRoom / format.channelCount / MemoryLayout<Float>.stride
+      guard maximumFrames >= 1 else { throw NetworkAudioSenderError.invalidDatagramBound }
+      if let framesPerPacket {
+        guard (1...maximumFrames).contains(framesPerPacket),
+          framesPerPacket <= capacityFrameCount
+        else {
+          throw NetworkAudioSenderError.invalidPacketFrameCount(framesPerPacket)
+        }
+        self.framesPerPacket = framesPerPacket
+      } else {
+        self.framesPerPacket = maximumFrames
       }
-      self.framesPerPacket = framesPerPacket
-    } else {
-      self.framesPerPacket = maximumFrames
+    case .opus:
+      // A compressed block costs what the encoder makes of it, so the datagram no longer decides
+      // the length: Opus does, and it defines only a handful.
+      guard NetworkAudioOpus.supportedSampleRates.contains(format.sampleRate) else {
+        throw NetworkAudioSenderError.opus(.unsupportedSampleRate(format.sampleRate))
+      }
+      guard NetworkAudioOpus.supportedChannelCounts.contains(format.channelCount) else {
+        throw NetworkAudioSenderError.opus(.unsupportedChannelCount(format.channelCount))
+      }
+      let resolved =
+        framesPerPacket
+        ?? NetworkAudioOpus.frameCount(
+          nearestTo: Self.preferredOpusBlockMilliseconds,
+          atSampleRate: format.sampleRate
+        )
+      guard let resolved,
+        NetworkAudioOpus.carries(frameCount: resolved, atSampleRate: format.sampleRate)
+      else {
+        throw NetworkAudioSenderError.opus(.unsupportedFrameCount(framesPerPacket ?? 0))
+      }
+      guard resolved <= capacityFrameCount else {
+        throw NetworkAudioSenderError.invalidPacketFrameCount(resolved)
+      }
+      self.framesPerPacket = resolved
     }
+  }
+
+  /// The block length Opus is asked for when nothing else is said.
+  ///
+  /// Ten milliseconds is where Opus stops paying much per packet for its own overhead without
+  /// adding delay a listener notices.
+  static let preferredOpusBlockMilliseconds = 10.0
+
+  /// The compressed bytes one packet may carry, which the datagram bound decides.
+  var maximumOpusPacketByteCount: Int {
+    min(
+      NetworkAudioOpus.maximumPacketByteCount,
+      maximumDatagramByteCount - NetworkAudioPacketCodec.headerByteCount
+        - (sharedKey == nil ? 0 : NetworkAudioSessionCipher.tagByteCount)
+    )
   }
 
   var maximumFrameCountPerPacket: Int {
@@ -123,6 +184,9 @@ public enum NetworkAudioSenderError: Error, Equatable, LocalizedError, Sendable 
   /// Network.framework rejected a datagram.
   case transport(NetworkAudioTransportFailure)
 
+  /// Opus cannot carry what this sender was asked to carry.
+  case opus(NetworkAudioOpusError)
+
   /// Packet encoding rejected internally produced metadata.
   case packet(NetworkAudioPacketError)
 
@@ -133,6 +197,8 @@ public enum NetworkAudioSenderError: Error, Equatable, LocalizedError, Sendable 
       "The network audio destination host is empty or too long."
     case .invalidPort:
       "The network audio destination port must be between 1 and 65,535."
+    case .opus(let error):
+      error.errorDescription
     case .invalidDatagramBound:
       "The network audio packet bound must fit one complete frame and remain below 16,384 bytes."
     case .invalidBufferCapacity:
@@ -326,7 +392,16 @@ private final class NetworkAudioSenderPacketizer: @unchecked Sendable {
   private let readOnlyPointers: [UnsafePointer<Float>]
   private let datagram: UnsafeMutableRawBufferPointer
   private let cipher: NetworkAudioSessionCipher?
+  private let opus: OpusStaging?
   private var sequence: UInt64 = 0
+
+  /// What compressing a block needs beyond the planar channels already read.
+  private struct OpusStaging {
+    let encoder: NetworkAudioOpusEncoder
+    let interleaved: UnsafeMutablePointer<Float>
+    let interleavedSampleCount: Int
+    let packet: UnsafeMutableRawBufferPointer
+  }
 
   init(
     configuration: NetworkAudioSenderConfiguration,
@@ -342,18 +417,60 @@ private final class NetworkAudioSenderPacketizer: @unchecked Sendable {
     }
     channelStorage = storage
     readOnlyPointers = storage.map { UnsafePointer($0) }
-    datagram = UnsafeMutableRawBufferPointer.allocate(
-      byteCount: NetworkAudioPacketCodec.datagramByteCount(
+    // A compressed block is usually smaller than the samples it replaces, but a short block at a
+    // high bit rate need not be, so the datagram is sized for whichever is larger.
+    let uncompressed =
+      NetworkAudioPacketCodec.datagramByteCount(
         channelCount: configuration.format.channelCount,
         frameCount: configuration.framesPerPacket
-      ) + NetworkAudioSessionCipher.tagByteCount,
+      ) + NetworkAudioSessionCipher.tagByteCount
+    let compressed =
+      NetworkAudioPacketCodec.headerByteCount + configuration.maximumOpusPacketByteCount
+      + NetworkAudioSessionCipher.tagByteCount
+    datagram = UnsafeMutableRawBufferPointer.allocate(
+      byteCount: configuration.encoding == .opus ? max(uncompressed, compressed) : uncompressed,
       alignment: MemoryLayout<UInt64>.alignment
     )
+    opus = Self.staging(for: configuration)
   }
 
   deinit {
     for pointer in channelStorage { pointer.deallocate() }
     datagram.deallocate()
+    guard let opus else { return }
+    opus.interleaved.deinitialize(count: opus.interleavedSampleCount)
+    opus.interleaved.deallocate()
+    opus.packet.deallocate()
+  }
+
+  /// Prepares compression, or nothing when the wire carries samples as they are.
+  ///
+  /// The configuration has already refused a format Opus cannot carry, so an encoder that still
+  /// cannot be built means the system withdrew the codec and the sender falls back to reporting
+  /// every packet rather than trapping here.
+  private static func staging(
+    for configuration: NetworkAudioSenderConfiguration
+  ) -> OpusStaging? {
+    guard configuration.encoding == .opus,
+      let encoder = try? NetworkAudioOpusEncoder(
+        sampleRate: configuration.format.sampleRate,
+        channelCount: configuration.format.channelCount,
+        frameCountPerPacket: configuration.framesPerPacket,
+        bitRate: configuration.opusBitRate
+      )
+    else { return nil }
+    let sampleCount = configuration.framesPerPacket * configuration.format.channelCount
+    let interleaved = UnsafeMutablePointer<Float>.allocate(capacity: sampleCount)
+    interleaved.initialize(repeating: 0, count: sampleCount)
+    return OpusStaging(
+      encoder: encoder,
+      interleaved: interleaved,
+      interleavedSampleCount: sampleCount,
+      packet: UnsafeMutableRawBufferPointer.allocate(
+        byteCount: configuration.maximumOpusPacketByteCount,
+        alignment: 16
+      )
+    )
   }
 
   /// Emits one packet when the queue holds a full one, and nothing otherwise.
@@ -367,16 +484,20 @@ private final class NetworkAudioSenderPacketizer: @unchecked Sendable {
 
     let written: Int
     do {
-      written = try readOnlyPointers.withUnsafeBufferPointer {
-        try NetworkAudioPacketCodec.encode(
-          sessionID: configuration.sessionID,
-          sequence: sequence,
-          format: configuration.format,
-          frameCount: frameCount,
-          planarChannels: $0,
-          into: datagram,
-          cipher: cipher
-        )
+      if let opus {
+        written = try compress(opus, frameCount: frameCount)
+      } else {
+        written = try readOnlyPointers.withUnsafeBufferPointer {
+          try NetworkAudioPacketCodec.encode(
+            sessionID: configuration.sessionID,
+            sequence: sequence,
+            format: configuration.format,
+            frameCount: frameCount,
+            planarChannels: $0,
+            into: datagram,
+            cipher: cipher
+          )
+        }
       }
     } catch {
       return
@@ -386,6 +507,27 @@ private final class NetworkAudioSenderPacketizer: @unchecked Sendable {
     connection.send(
       content: Data(bytes: base, count: written),
       completion: .idempotent
+    )
+  }
+
+  /// Weaves the channels together, compresses them, and writes the datagram.
+  private func compress(_ opus: OpusStaging, frameCount: Int) throws -> Int {
+    let channelCount = configuration.format.channelCount
+    for frame in 0..<frameCount {
+      for channel in 0..<channelCount {
+        opus.interleaved[frame * channelCount + channel] = channelStorage[channel][frame]
+      }
+    }
+    let byteCount = try opus.encoder.encode(input: opus.interleaved, into: opus.packet)
+    return try NetworkAudioPacketCodec.encode(
+      sessionID: configuration.sessionID,
+      sequence: sequence,
+      format: configuration.format,
+      frameCount: frameCount,
+      encoding: .opus,
+      payload: UnsafeRawBufferPointer(rebasing: opus.packet[..<byteCount]),
+      into: datagram,
+      cipher: cipher
     )
   }
 }

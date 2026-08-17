@@ -28,7 +28,31 @@ public struct NetworkAudioStreamFormat: Equatable, Hashable, Sendable {
   }
 }
 
-/// A validated version-1 PCM datagram.
+/// How a packet's payload is represented on the wire.
+public enum NetworkAudioWireEncoding: UInt8, Equatable, Hashable, Sendable, CaseIterable {
+  /// Interleaved little-endian Float32 samples, one payload byte for every sample byte.
+  case interleavedFloat32 = 1
+
+  /// One Opus packet, whose length is whatever the encoder produced.
+  case opus = 2
+
+  /// Whether a payload of `byteCount` bytes can carry `frameCount` frames of this format.
+  func carries(payloadByteCount: Int, channelCount: Int, frameCount: Int) -> Bool {
+    switch self {
+    case .interleavedFloat32:
+      let samples = channelCount.multipliedReportingOverflow(by: frameCount)
+      guard !samples.overflow else { return false }
+      let bytes = samples.partialValue.multipliedReportingOverflow(
+        by: MemoryLayout<Float>.stride)
+      guard !bytes.overflow else { return false }
+      return payloadByteCount == bytes.partialValue
+    case .opus:
+      return (1...NetworkAudioOpus.maximumPacketByteCount).contains(payloadByteCount)
+    }
+  }
+}
+
+/// A validated version-1 datagram.
 public struct NetworkAudioPacket: Equatable, Sendable {
   /// The sender session that owns the monotonically increasing sequence.
   public let sessionID: UUID
@@ -42,27 +66,38 @@ public struct NetworkAudioPacket: Equatable, Sendable {
   /// The complete sample-frame count represented by the payload.
   public let frameCount: Int
 
-  /// Interleaved little-endian Float32 samples.
+  /// How ``payload`` is represented.
+  public let encoding: NetworkAudioWireEncoding
+
+  /// The payload, as ``encoding`` describes it.
   public let payload: Data
 
-  /// Creates a packet after validating its exact payload size.
+  /// Creates a packet after validating that its payload can carry what it claims.
   public init(
     sessionID: UUID,
     sequence: UInt64,
     format: NetworkAudioStreamFormat,
     frameCount: Int,
-    payload: Data
+    payload: Data,
+    encoding: NetworkAudioWireEncoding = .interleavedFloat32
   ) throws {
     guard frameCount > 0 else {
       throw NetworkAudioPacketError.invalidFrameCount(frameCount)
     }
-    let expectedByteCount = try Self.payloadByteCount(
-      channelCount: format.channelCount,
-      frameCount: frameCount
-    )
-    guard payload.count == expectedByteCount else {
+    guard
+      encoding.carries(
+        payloadByteCount: payload.count,
+        channelCount: format.channelCount,
+        frameCount: frameCount
+      )
+    else {
+      let expected =
+        encoding == .interleavedFloat32
+        ? try Self.payloadByteCount(
+          channelCount: format.channelCount, frameCount: frameCount)
+        : NetworkAudioOpus.maximumPacketByteCount
       throw NetworkAudioPacketError.payloadSizeMismatch(
-        expected: expectedByteCount,
+        expected: expected,
         actual: payload.count
       )
     }
@@ -71,6 +106,7 @@ public struct NetworkAudioPacket: Equatable, Sendable {
     self.format = format
     self.frameCount = frameCount
     self.payload = payload
+    self.encoding = encoding
   }
 
   private static func payloadByteCount(channelCount: Int, frameCount: Int) throws -> Int {
@@ -166,7 +202,6 @@ public enum NetworkAudioPacketCodec {
   public static let encryptedFlag: UInt16 = 0x0001
 
   private static let magic: UInt32 = 0x524C_5941  // RLYA
-  private static let interleavedFloat32Encoding: UInt8 = 1
 
   /// Serializes a validated packet using network byte order and little-endian Float32 payloads.
   public static func encode(_ packet: NetworkAudioPacket) throws -> Data {
@@ -178,7 +213,7 @@ public enum NetworkAudioPacketCodec {
     var data = Data(capacity: datagramByteCount)
     data.appendInteger(magic)
     data.append(version)
-    data.append(interleavedFloat32Encoding)
+    data.append(packet.encoding.rawValue)
     data.appendInteger(UInt16(0))
     withUnsafeBytes(of: packet.sessionID.uuid) { data.append(contentsOf: $0) }
     data.appendInteger(packet.sequence)
@@ -230,7 +265,7 @@ public enum NetworkAudioPacketCodec {
     var cursor = DatagramWriter(destination: destination)
     cursor.appendInteger(magic)
     cursor.appendByte(version)
-    cursor.appendByte(interleavedFloat32Encoding)
+    cursor.appendByte(NetworkAudioWireEncoding.interleavedFloat32.rawValue)
     cursor.appendInteger(cipher == nil ? UInt16(0) : encryptedFlag)
     withUnsafeBytes(of: sessionID.uuid) { cursor.appendBytes($0) }
     cursor.appendInteger(sequence)
@@ -307,9 +342,9 @@ public enum NetworkAudioPacketCodec {
     guard decodedVersion == version else {
       throw NetworkAudioPacketError.unsupportedVersion(decodedVersion)
     }
-    let encoding = try cursor.readByte()
-    guard encoding == interleavedFloat32Encoding else {
-      throw NetworkAudioPacketError.unsupportedEncoding(encoding)
+    let encodingValue = try cursor.readByte()
+    guard let encoding = NetworkAudioWireEncoding(rawValue: encodingValue) else {
+      throw NetworkAudioPacketError.unsupportedEncoding(encodingValue)
     }
     let flags = try cursor.readInteger(as: UInt16.self)
     guard flags & ~encryptedFlag == 0 else {
@@ -335,18 +370,18 @@ public enum NetworkAudioPacketCodec {
       sampleRate: Double(sampleRateValue),
       channelCount: channelCount
     )
-    let expected = channelCount.multipliedReportingOverflow(by: frameCount)
-    guard !expected.overflow else { throw NetworkAudioPacketError.datagramTooLarge }
-    let expectedBytes = expected.partialValue.multipliedReportingOverflow(
-      by: MemoryLayout<Float>.stride
-    )
-    guard !expectedBytes.overflow else { throw NetworkAudioPacketError.datagramTooLarge }
     guard frameCount > 0 else {
       throw NetworkAudioPacketError.invalidFrameCount(frameCount)
     }
-    guard payloadByteCount == expectedBytes.partialValue else {
+    guard
+      encoding.carries(
+        payloadByteCount: payloadByteCount,
+        channelCount: channelCount,
+        frameCount: frameCount
+      )
+    else {
       throw NetworkAudioPacketError.payloadSizeMismatch(
-        expected: expectedBytes.partialValue,
+        expected: 0,
         actual: payloadByteCount
       )
     }
@@ -381,8 +416,72 @@ public enum NetworkAudioPacketCodec {
       sequence: sequence,
       format: format,
       frameCount: frameCount,
-      payload: payload
+      payload: payload,
+      encoding: encoding
     )
+  }
+
+  /// Writes one datagram carrying a payload that is already compressed.
+  ///
+  /// The realtime sender calls this once per packet, so it allocates nothing.
+  ///
+  /// - Returns: the bytes written.
+  /// - Throws: ``NetworkAudioPacketError`` when the payload cannot be carried.
+  public static func encode(
+    sessionID: UUID,
+    sequence: UInt64,
+    format: NetworkAudioStreamFormat,
+    frameCount: Int,
+    encoding: NetworkAudioWireEncoding,
+    payload: UnsafeRawBufferPointer,
+    into destination: UnsafeMutableRawBufferPointer,
+    cipher: NetworkAudioSessionCipher? = nil
+  ) throws -> Int {
+    guard frameCount > 0, frameCount <= Int(UInt16.max) else {
+      throw NetworkAudioPacketError.invalidFrameCount(frameCount)
+    }
+    guard
+      encoding.carries(
+        payloadByteCount: payload.count,
+        channelCount: format.channelCount,
+        frameCount: frameCount
+      ), let source = payload.baseAddress
+    else {
+      throw NetworkAudioPacketError.payloadSizeMismatch(expected: 0, actual: payload.count)
+    }
+    let tagByteCount = cipher == nil ? 0 : NetworkAudioSessionCipher.tagByteCount
+    let datagramByteCount = headerByteCount + payload.count + tagByteCount
+    guard datagramByteCount <= maximumDatagramByteCount,
+      destination.count >= datagramByteCount,
+      let base = destination.baseAddress
+    else {
+      throw NetworkAudioPacketError.datagramTooLarge
+    }
+
+    var cursor = DatagramWriter(destination: destination)
+    cursor.appendInteger(magic)
+    cursor.appendByte(version)
+    cursor.appendByte(encoding.rawValue)
+    cursor.appendInteger(cipher == nil ? UInt16(0) : encryptedFlag)
+    withUnsafeBytes(of: sessionID.uuid) { cursor.appendBytes($0) }
+    cursor.appendInteger(sequence)
+    cursor.appendInteger(UInt32(format.sampleRate.rounded()))
+    cursor.appendInteger(UInt16(format.channelCount))
+    cursor.appendInteger(UInt16(frameCount))
+    cursor.appendInteger(UInt32(payload.count))
+    cursor.appendInteger(UInt32(0))
+
+    base.advanced(by: headerByteCount).copyMemory(from: source, byteCount: payload.count)
+    guard let cipher else { return datagramByteCount }
+    let sealed = try cipher.seal(
+      payload: UnsafeMutableRawBufferPointer(
+        start: base.advanced(by: headerByteCount),
+        count: payload.count
+      ),
+      sequence: sequence,
+      authenticating: UnsafeRawBufferPointer(start: base, count: headerByteCount)
+    )
+    return headerByteCount + sealed
   }
 }
 
