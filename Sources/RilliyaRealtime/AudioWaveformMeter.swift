@@ -28,7 +28,15 @@ public final class AudioWaveformMeter: @unchecked Sendable {
   public static let defaultUpdatesPerSecond = 30
 
   /// The interval one snapshot covers.
-  public static let defaultInterval = Duration.milliseconds(1_000 / defaultUpdatesPerSecond)
+  public static let defaultInterval = interval(forUpdatesPerSecond: defaultUpdatesPerSecond)
+
+  /// The interval that reports `updatesPerSecond` times a second.
+  ///
+  /// Nothing above is refused. A rate a machine cannot keep up with is the caller's choice, and
+  /// the arithmetic holds whatever they ask for.
+  public static func interval(forUpdatesPerSecond updatesPerSecond: Int) -> Duration {
+    .nanoseconds(1_000_000_000 / max(updatesPerSecond, 1))
+  }
 
   /// The samples one channel's drawn waveform is reduced to.
   public static let defaultWaveformSampleCount = 512
@@ -57,6 +65,9 @@ public final class AudioWaveformMeter: @unchecked Sendable {
   ///   - sampleRate: the producer's rate, which decides how many frames one interval holds.
   ///   - interval: how much audio each snapshot covers.
   ///   - waveformSampleCount: the samples one channel's waveform is reduced to.
+  ///
+  /// A rate faster than the audio itself gathers less than one frame per report, which is
+  /// meaningless but not broken: the interval is held at one frame rather than zero.
   public init(
     channelIDs: [AudioChannelID],
     sampleRate: Double,
@@ -80,21 +91,21 @@ public final class AudioWaveformMeter: @unchecked Sendable {
 
   /// Offers interleaved frames the producer has just put out.
   ///
-  /// Copies and returns; it never measures, allocates, or waits on the reader. Frames beyond the
-  /// interval being gathered are dropped, because a meter reports the recent rather than all of it.
+  /// Every frame offered is gathered, reporting each time an interval fills. A submission larger
+  /// than one interval is the ordinary case rather than the exception — a lossless block is four
+  /// thousand frames and an interval at thirty a second is sixteen hundred — so taking only the
+  /// first interval's worth would throw most of the audio away and report once per block instead
+  /// of once per interval.
   public func submit(interleaved samples: UnsafePointer<Float>, frameCount: Int) {
     guard frameCount > 0 else { return }
-    let ready: Int? = inputLock.withLock {
-      let room = capacityFrameCount - writtenFrameCount
-      guard room > 0 else { return writtenFrameCount }
-      let taken = min(room, frameCount)
-      storage.advanced(by: writtenFrameCount * channelCount)
-        .update(from: samples, count: taken * channelCount)
-      writtenFrameCount += taken
-      return writtenFrameCount >= capacityFrameCount ? writtenFrameCount : nil
+    var offset = 0
+    while offset < frameCount {
+      let taken = gather(frameCount - offset) { destination, count in
+        destination.update(from: samples + offset * channelCount, count: count * channelCount)
+      }
+      offset += taken.consumed
+      if let ready = taken.ready { measure(frameCount: ready) }
     }
-    guard let ready else { return }
-    measure(frameCount: ready)
   }
 
   /// Offers planar frames the producer has just put out, one pointer per channel.
@@ -106,22 +117,36 @@ public final class AudioWaveformMeter: @unchecked Sendable {
     frameCount: Int
   ) {
     guard frameCount > 0, !channels.isEmpty else { return }
-    let ready: Int? = inputLock.withLock {
-      let room = capacityFrameCount - writtenFrameCount
-      guard room > 0 else { return writtenFrameCount }
-      let taken = min(room, frameCount)
-      let base = storage.advanced(by: writtenFrameCount * channelCount)
-      for frame in 0..<taken {
-        for channel in 0..<channelCount {
-          base[frame * channelCount + channel] =
-            channel < channels.count ? channels[channel][frame] : 0
+    var offset = 0
+    while offset < frameCount {
+      let taken = gather(frameCount - offset) { destination, count in
+        for frame in 0..<count {
+          for channel in 0..<channelCount {
+            destination[frame * channelCount + channel] =
+              channel < channels.count ? channels[channel][offset + frame] : 0
+          }
         }
       }
-      writtenFrameCount += taken
-      return writtenFrameCount >= capacityFrameCount ? writtenFrameCount : nil
+      offset += taken.consumed
+      if let ready = taken.ready { measure(frameCount: ready) }
     }
-    guard let ready else { return }
-    measure(frameCount: ready)
+  }
+
+  /// Takes as much of what is offered as the interval being gathered has room for.
+  ///
+  /// - Returns: how many frames were taken, and the interval's length when it filled.
+  private func gather(
+    _ available: Int,
+    writing: (UnsafeMutablePointer<Float>, Int) -> Void
+  ) -> (consumed: Int, ready: Int?) {
+    inputLock.withLock {
+      let room = capacityFrameCount - writtenFrameCount
+      let taken = min(max(room, 0), available)
+      guard taken > 0 else { return (available, capacityFrameCount) }
+      writing(storage.advanced(by: writtenFrameCount * channelCount), taken)
+      writtenFrameCount += taken
+      return (taken, writtenFrameCount >= capacityFrameCount ? capacityFrameCount : nil)
+    }
   }
 
   /// The most recent snapshot, or an empty array before enough audio has arrived.

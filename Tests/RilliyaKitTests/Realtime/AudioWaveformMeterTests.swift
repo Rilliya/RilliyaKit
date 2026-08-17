@@ -203,6 +203,88 @@ struct AudioWaveformMeterTests {
     #expect(count.withLock { $0 } == 1)
   }
 
+  /// A rate is the caller's to choose, so the arithmetic has to hold at any of them.
+  @Test(
+    "Any rate a caller asks for produces a usable interval",
+    arguments: [1, 30, 60, 120, 240, 1_000, 100_000, 1_000_000]
+  )
+  func anyRateIsUsable(updatesPerSecond: Int) {
+    let interval = AudioWaveformMeter.interval(forUpdatesPerSecond: updatesPerSecond)
+    #expect(interval > .zero, "\(updatesPerSecond) gave an interval of nothing")
+
+    let meter = AudioWaveformMeter(
+      channelIDs: Fixture.channelIDs(),
+      sampleRate: Fixture.sampleRate,
+      interval: interval
+    )
+    // One second of audio, whatever the rate, and it must report something and not trap.
+    Self.feedTone(meter, frameCount: Int(Fixture.sampleRate))
+
+    #expect(meter.snapshot().count == Fixture.channelCount)
+  }
+
+  /// A rate below one would report nothing at all, so it is the one value held.
+  @Test("A rate of nothing is held at the slowest that still reports")
+  func nonPositiveRateIsHeld() {
+    for rate in [0, -1, Int.min + 1] {
+      #expect(
+        AudioWaveformMeter.interval(forUpdatesPerSecond: rate)
+          == AudioWaveformMeter.interval(forUpdatesPerSecond: 1)
+      )
+    }
+  }
+
+  /// The rate decides how often there is something new, which is what the preference sets.
+  @Test("A faster rate reports more often over the same audio")
+  func fasterRateReportsMoreOften() {
+    let slow = AudioWaveformMeter(
+      channelIDs: Fixture.channelIDs(),
+      sampleRate: Fixture.sampleRate,
+      interval: AudioWaveformMeter.interval(forUpdatesPerSecond: 30)
+    )
+    let fast = AudioWaveformMeter(
+      channelIDs: Fixture.channelIDs(),
+      sampleRate: Fixture.sampleRate,
+      interval: AudioWaveformMeter.interval(forUpdatesPerSecond: 120)
+    )
+    let slowCount = OSAllocatedUnfairLock<Int>(initialState: 0)
+    let fastCount = OSAllocatedUnfairLock<Int>(initialState: 0)
+    slow.onPublish { _ in slowCount.withLock { $0 += 1 } }
+    fast.onPublish { _ in fastCount.withLock { $0 += 1 } }
+
+    // Exactly one second of audio through each.
+    Self.feedTone(slow, frameCount: Int(Fixture.sampleRate))
+    Self.feedTone(fast, frameCount: Int(Fixture.sampleRate))
+
+    #expect(slowCount.withLock { $0 } == 30)
+    #expect(fastCount.withLock { $0 } == 120)
+  }
+
+  /// A submission larger than one interval is the ordinary case, not the exception.
+  ///
+  /// A lossless block is 4096 frames and an interval at thirty a second is 1600, so taking only
+  /// the first interval's worth threw most of every block away and reported once per block
+  /// instead of once per interval.
+  @Test("A block larger than an interval is gathered whole")
+  func oversizedSubmissionIsGatheredWhole() {
+    let meter = Fixture.meter()
+    let reports = OSAllocatedUnfairLock<Int>(initialState: 0)
+    meter.onPublish { _ in reports.withLock { $0 += 1 } }
+
+    // Four thousand and ninety-six frames at a time, as Apple Lossless arrives, for one second.
+    let block = 4_096
+    let blocks = Int(Fixture.sampleRate) / block
+    for _ in 0..<blocks {
+      Self.feedTone(meter, frameCount: block)
+    }
+
+    // A second of audio is a second's worth of reports, however it was handed over.
+    let counted = reports.withLock { $0 }
+    let expected = blocks * block / Fixture.intervalFrameCount
+    #expect(counted == expected, "reported \(counted) times for \(expected) intervals of audio")
+    #expect(counted > blocks, "reported once per block rather than once per interval")
+  }
+
   private static func feedTone(
     _ meter: AudioWaveformMeter,
     frameCount: Int,

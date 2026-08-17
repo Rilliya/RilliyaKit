@@ -61,12 +61,18 @@ public struct AudioFileFrameStreamConfiguration: Equatable, Hashable, Sendable {
   /// The largest file read performed by the background producer.
   public let chunkFrameCount: Int
 
+  /// How many times a second the meter reports what has been decoded.
+  ///
+  /// Only what draws it cares, so it is here rather than fixed.
+  public let waveformUpdatesPerSecond: Int
+
   /// Creates validated, bounded file-streaming controls.
   public init(
     sampleRate: Double,
     loopMode: AudioFileLoopMode = .once,
     capacityFrameCount: Int = 16_384,
-    chunkFrameCount: Int = 1_024
+    chunkFrameCount: Int = 1_024,
+    waveformUpdatesPerSecond: Int = AudioWaveformMeter.defaultUpdatesPerSecond
   ) throws {
     guard sampleRate.isFinite, sampleRate > 0 else {
       throw AudioFileFrameStreamError.invalidSampleRate(sampleRate)
@@ -86,6 +92,7 @@ public struct AudioFileFrameStreamConfiguration: Equatable, Hashable, Sendable {
     self.loopMode = loopMode
     self.capacityFrameCount = capacityFrameCount
     self.chunkFrameCount = chunkFrameCount
+    self.waveformUpdatesPerSecond = waveformUpdatesPerSecond
   }
 
   private static func isValid(loopMode: AudioFileLoopMode) -> Bool {
@@ -234,7 +241,9 @@ public final class AudioFileFrameStream: @unchecked Sendable {
           AudioChannelID(ownerID: .source(.stream(streamID)), index: $0)
         }
       },
-      sampleRate: configuration.sampleRate
+      sampleRate: configuration.sampleRate,
+      interval: AudioWaveformMeter.interval(
+        forUpdatesPerSecond: configuration.waveformUpdatesPerSecond)
     )
   }
 

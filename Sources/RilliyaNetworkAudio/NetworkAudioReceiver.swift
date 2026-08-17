@@ -28,6 +28,12 @@ public struct NetworkAudioReceiverConfiguration: Equatable, Hashable, Sendable {
   /// How much audio the receiver holds before a render callback may read it.
   public let jitter: AudioJitterBufferConfiguration
 
+  /// How many times a second the meter reports what has arrived.
+  ///
+  /// Only what draws it cares, so it is here rather than fixed: a host drawing at its display's
+  /// rate asks for that, and one drawing nothing pays for the slowest.
+  public let waveformUpdatesPerSecond: Int
+
   /// Whether a gap is asked for again rather than only waited out.
   ///
   /// Asking costs a datagram and only helps where the answer can arrive before the audio is
@@ -59,6 +65,7 @@ public struct NetworkAudioReceiverConfiguration: Equatable, Hashable, Sendable {
     jitter: AudioJitterBufferConfiguration = .localNetwork,
     reorderDepth: Int = 8,
     requestsRetransmission: Bool = true,
+    waveformUpdatesPerSecond: Int = AudioWaveformMeter.defaultUpdatesPerSecond,
     sharedKey: NetworkAudioSharedKey? = nil
   ) throws {
     guard port > 0 else { throw NetworkAudioReceiverError.invalidPort }
@@ -90,6 +97,7 @@ public struct NetworkAudioReceiverConfiguration: Equatable, Hashable, Sendable {
     self.jitter = jitter
     self.reorderDepth = reorderDepth
     self.requestsRetransmission = requestsRetransmission
+    self.waveformUpdatesPerSecond = waveformUpdatesPerSecond
     self.sharedKey = sharedKey
   }
 }
@@ -437,7 +445,9 @@ final class NetworkAudioPacketIngestor {
           AudioChannelID(ownerID: .source(.stream(streamID)), index: $0)
         }
       },
-      sampleRate: configuration.format.sampleRate
+      sampleRate: configuration.format.sampleRate,
+      interval: AudioWaveformMeter.interval(
+        forUpdatesPerSecond: configuration.waveformUpdatesPerSecond)
     )
     interleavedStorage = .allocate(capacity: sampleCapacity)
     // Initialized rather than left raw: anything that reads further than the last packet wrote
