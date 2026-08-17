@@ -19,21 +19,21 @@ struct NetworkAudioOpusBlockTests {
     ]
   )
   func frameCountsMatchTheDefinition(sampleRate: Double, expected: [Int]) {
-    #expect(NetworkAudioOpus.frameCounts(atSampleRate: sampleRate) == expected)
+    #expect(NetworkAudioCodec.opus.frameCounts(sampleRate: sampleRate, channelCount: 2) == expected)
   }
 
   @Test("A rate Opus does not carry offers no block lengths")
   func unsupportedRateOffersNothing() {
-    #expect(NetworkAudioOpus.frameCounts(atSampleRate: 44_100).isEmpty)
-    #expect(!NetworkAudioOpus.carries(frameCount: 128, atSampleRate: 44_100))
+    #expect(NetworkAudioCodec.opus.frameCounts(sampleRate: 44_100, channelCount: 2).isEmpty)
+    #expect(!NetworkAudioCodec.opus.carries(frameCount: 128, sampleRate: 44_100, channelCount: 2))
   }
 
   /// A render quantum is not an Opus block, so a sender has to be given one that is.
   @Test("A block a graph would render is not mistaken for one Opus carries")
   func renderQuantaAreNotOpusBlocks() {
-    #expect(!NetworkAudioOpus.carries(frameCount: 128, atSampleRate: 48_000))
-    #expect(!NetworkAudioOpus.carries(frameCount: 512, atSampleRate: 48_000))
-    #expect(NetworkAudioOpus.carries(frameCount: 480, atSampleRate: 48_000))
+    #expect(!NetworkAudioCodec.opus.carries(frameCount: 128, sampleRate: 48_000, channelCount: 2))
+    #expect(!NetworkAudioCodec.opus.carries(frameCount: 512, sampleRate: 48_000, channelCount: 2))
+    #expect(NetworkAudioCodec.opus.carries(frameCount: 480, sampleRate: 48_000, channelCount: 2))
   }
 
   @Test(
@@ -42,7 +42,8 @@ struct NetworkAudioOpusBlockTests {
   )
   func nearestBlockIsCarried(milliseconds: Double, expected: Int) {
     #expect(
-      NetworkAudioOpus.frameCount(nearestTo: milliseconds, atSampleRate: 48_000) == expected
+      NetworkAudioCodec.opus.frameCount(
+        nearestTo: milliseconds, sampleRate: 48_000, channelCount: 2) == expected
     )
   }
 }
@@ -77,7 +78,7 @@ struct NetworkAudioOpusRoundTripTests {
     let harness = try Harness()
 
     for block in 0..<Fixture.blocks {
-      #expect(try harness.encodeBlock(block) <= NetworkAudioOpus.maximumPacketByteCount)
+      #expect(try harness.encodeBlock(block) <= NetworkAudioCodec.maximumPacketByteCount)
     }
   }
 
@@ -135,16 +136,18 @@ struct NetworkAudioOpusRoundTripTests {
     arguments: [(44_100.0, 2, 480), (48_000.0, 3, 480), (48_000.0, 2, 128)]
   )
   func unsupportedFormatsAreRefused(sampleRate: Double, channelCount: Int, frameCount: Int) {
-    #expect(throws: NetworkAudioOpusError.self) {
-      _ = try NetworkAudioOpusEncoder(
+    #expect(throws: NetworkAudioCodecError.self) {
+      _ = try NetworkAudioCompressedEncoder(
+        codec: .opus,
         sampleRate: sampleRate,
         channelCount: channelCount,
         frameCountPerPacket: frameCount,
         bitRate: Fixture.bitRate
       )
     }
-    #expect(throws: NetworkAudioOpusError.self) {
-      _ = try NetworkAudioOpusDecoder(
+    #expect(throws: NetworkAudioCodecError.self) {
+      _ = try NetworkAudioCompressedDecoder(
+        codec: .opus,
         sampleRate: sampleRate,
         channelCount: channelCount,
         frameCountPerPacket: frameCount
@@ -153,20 +156,22 @@ struct NetworkAudioOpusRoundTripTests {
   }
 
   private final class Harness {
-    let encoder: NetworkAudioOpusEncoder
-    let decoder: NetworkAudioOpusDecoder
+    let encoder: NetworkAudioCompressedEncoder
+    let decoder: NetworkAudioCompressedDecoder
     let packet: UnsafeMutablePointer<UInt8>
     private let input: UnsafeMutablePointer<Float>
     private let output: UnsafeMutablePointer<Float>
 
     init() throws {
-      encoder = try NetworkAudioOpusEncoder(
+      encoder = try NetworkAudioCompressedEncoder(
+        codec: .opus,
         sampleRate: Fixture.sampleRate,
         channelCount: Fixture.channelCount,
         frameCountPerPacket: Fixture.frameCount,
         bitRate: Fixture.bitRate
       )
-      decoder = try NetworkAudioOpusDecoder(
+      decoder = try NetworkAudioCompressedDecoder(
+        codec: .opus,
         sampleRate: Fixture.sampleRate,
         channelCount: Fixture.channelCount,
         frameCountPerPacket: Fixture.frameCount
@@ -174,10 +179,10 @@ struct NetworkAudioOpusRoundTripTests {
       let sampleCount = Fixture.frameCount * Fixture.channelCount
       input = .allocate(capacity: sampleCount)
       output = .allocate(capacity: sampleCount)
-      packet = .allocate(capacity: NetworkAudioOpus.maximumPacketByteCount)
+      packet = .allocate(capacity: NetworkAudioCodec.maximumPacketByteCount)
       input.initialize(repeating: 0, count: sampleCount)
       output.initialize(repeating: 0, count: sampleCount)
-      packet.initialize(repeating: 0, count: NetworkAudioOpus.maximumPacketByteCount)
+      packet.initialize(repeating: 0, count: NetworkAudioCodec.maximumPacketByteCount)
     }
 
     deinit {
@@ -201,7 +206,7 @@ struct NetworkAudioOpusRoundTripTests {
         input: input,
         into: UnsafeMutableRawBufferPointer(
           start: packet,
-          count: NetworkAudioOpus.maximumPacketByteCount
+          count: NetworkAudioCodec.maximumPacketByteCount
         )
       )
     }
@@ -314,7 +319,7 @@ struct NetworkAudioOpusWireTests {
     }
     #expect(throws: (any Error).self) {
       _ = try encode(
-        payload: Data(count: NetworkAudioOpus.maximumPacketByteCount + 1),
+        payload: Data(count: NetworkAudioCodec.maximumPacketByteCount + 1),
         key: nil
       )
     }
@@ -343,7 +348,8 @@ struct NetworkAudioOpusWireTests {
       ),
       frameBuffer: frameBuffer
     )
-    let encoder = try NetworkAudioOpusEncoder(
+    let encoder = try NetworkAudioCompressedEncoder(
+      codec: .opus,
       sampleRate: Fixture.sampleRate,
       channelCount: Fixture.channelCount,
       frameCountPerPacket: Fixture.frameCount,
@@ -410,5 +416,182 @@ struct NetworkAudioOpusWireTests {
       }
     }
     return datagram.prefix(written)
+  }
+}
+
+/// Every codec offered has to survive the same round trip, or offering it is a promise the wire
+/// does not keep.
+@Suite("Network audio codecs")
+struct NetworkAudioCodecSuiteTests {
+  private static let codecs = NetworkAudioCodec.all
+
+  @Test("Every codec the system offers can be both built and read")
+  func everyCodecBuildsBothWays() throws {
+    for codec in Self.codecs {
+      let rate = try #require(codec.supportedSampleRates.last)
+      let channels = try #require(codec.supportedChannelCounts.first { $0 == 2 })
+      let frames = try #require(
+        codec.frameCount(nearestTo: 10, sampleRate: rate, channelCount: channels))
+
+      #expect(throws: Never.self) {
+        _ = try NetworkAudioCompressedEncoder(
+          codec: codec,
+          sampleRate: rate,
+          channelCount: channels,
+          frameCountPerPacket: frames,
+          bitRate: 128_000
+        )
+      }
+      #expect(throws: Never.self) {
+        _ = try NetworkAudioCompressedDecoder(
+          codec: codec,
+          sampleRate: rate,
+          channelCount: channels,
+          frameCountPerPacket: frames
+        )
+      }
+    }
+  }
+
+  /// Not a sine: a pure tone compresses to almost nothing and would pass a codec that is broken
+  /// on anything real.
+  @Test("Every codec carries music-like content back at its own level")
+  func everyCodecCarriesTheAudio() throws {
+    for codec in Self.codecs {
+      let harness = try Harness(codec: codec)
+
+      let decoded = try harness.roundTrip(blocks: 24)
+
+      let settled = Array(decoded.dropFirst(harness.frameCount * 4))
+      #expect(!settled.isEmpty, "\(codec.encoding) produced nothing")
+      #expect(harness.level(settled) > 0.10, "\(codec.encoding) came back too quiet")
+      #expect(harness.level(settled) < 0.40, "\(codec.encoding) came back too loud")
+    }
+  }
+
+  @Test("Every codec's packets stay inside the bound the wire allows")
+  func everyCodecStaysBounded() throws {
+    for codec in Self.codecs {
+      let harness = try Harness(codec: codec)
+      for block in 0..<24 {
+        let byteCount = try harness.encodeBlock(block)
+        #expect(byteCount > 0)
+        #expect(byteCount <= NetworkAudioCodec.maximumPacketByteCount)
+      }
+    }
+  }
+
+  /// A block length is a floor under the delay of the whole path, so it is part of what a codec
+  /// promises.
+  @Test("Every codec offers a block short enough for live audio")
+  func everyCodecIsShortEnoughForLiveAudio() throws {
+    for codec in Self.codecs {
+      let frames = try #require(
+        codec.frameCount(nearestTo: 10, sampleRate: 48_000, channelCount: 2))
+      let milliseconds = Double(frames) / 48_000 * 1_000
+      #expect(milliseconds <= 25, "\(codec.encoding) packs \(milliseconds) ms per packet")
+    }
+  }
+
+  /// Opus cannot carry 44.1 kHz and the low-delay AAC profiles can, which is the whole reason to
+  /// offer more than one.
+  @Test("The codecs between them carry the rates a source is likely to arrive at")
+  func codecsCoverTheUsualRates() {
+    #expect(!NetworkAudioCodec.opus.supportedSampleRates.contains(44_100))
+    #expect(NetworkAudioCodec.aacEnhancedLowDelay.supportedSampleRates.contains(44_100))
+    #expect(NetworkAudioCodec.aacLowDelay.supportedSampleRates.contains(44_100))
+    for codec in NetworkAudioCodec.all {
+      #expect(codec.supportedSampleRates.contains(48_000))
+      #expect(codec.supportedChannelCounts.contains(2))
+    }
+  }
+
+  @Test("A datagram's encoding byte names exactly one codec")
+  func encodingNamesOneCodec() {
+    #expect(NetworkAudioCodec.codec(for: .interleavedFloat32) == nil)
+    for codec in NetworkAudioCodec.all {
+      #expect(NetworkAudioCodec.codec(for: codec.encoding) == codec)
+    }
+    #expect(Set(NetworkAudioCodec.all.map(\.encoding)).count == NetworkAudioCodec.all.count)
+  }
+
+  private final class Harness {
+    let codec: NetworkAudioCodec
+    let frameCount: Int
+    private let encoder: NetworkAudioCompressedEncoder
+    private let decoder: NetworkAudioCompressedDecoder
+    private let input: UnsafeMutablePointer<Float>
+    private let output: UnsafeMutablePointer<Float>
+    private let packet: UnsafeMutableRawBufferPointer
+    private let channelCount = 2
+    private let sampleRate = 48_000.0
+    private var seed: UInt64 = 0x2545_F491_4F6C_DD1D
+
+    init(codec: NetworkAudioCodec) throws {
+      self.codec = codec
+      frameCount = try #require(
+        codec.frameCount(nearestTo: 10, sampleRate: 48_000, channelCount: 2))
+      encoder = try NetworkAudioCompressedEncoder(
+        codec: codec,
+        sampleRate: sampleRate,
+        channelCount: channelCount,
+        frameCountPerPacket: frameCount,
+        bitRate: 128_000
+      )
+      decoder = try NetworkAudioCompressedDecoder(
+        codec: codec,
+        sampleRate: sampleRate,
+        channelCount: channelCount,
+        frameCountPerPacket: frameCount
+      )
+      let sampleCount = frameCount * channelCount
+      input = .allocate(capacity: sampleCount)
+      output = .allocate(capacity: sampleCount)
+      input.initialize(repeating: 0, count: sampleCount)
+      output.initialize(repeating: 0, count: sampleCount)
+      packet = .allocate(
+        byteCount: NetworkAudioCodec.maximumPacketByteCount, alignment: 16)
+    }
+
+    deinit {
+      input.deallocate()
+      output.deallocate()
+      packet.deallocate()
+    }
+
+    func encodeBlock(_ block: Int) throws -> Int {
+      for frame in 0..<frameCount {
+        let position = Double(block * frameCount + frame)
+        seed = seed &* 6_364_136_223_846_793_005 &+ 1
+        let noise = Double(Int64(bitPattern: seed >> 11)) / Double(1 << 52) * 0.04
+        let value = Float(
+          0.20 * sin(2 * .pi * 220 * position / sampleRate)
+            + 0.10 * sin(2 * .pi * 3_140 * position / sampleRate)
+            + 0.06 * sin(2 * .pi * 7_700 * position / sampleRate) + noise
+        )
+        for channel in 0..<channelCount {
+          input[frame * channelCount + channel] = value
+        }
+      }
+      return try encoder.encode(input: input, into: packet)
+    }
+
+    func roundTrip(blocks: Int) throws -> [Float] {
+      var decoded: [Float] = []
+      for block in 0..<blocks {
+        let byteCount = try encodeBlock(block)
+        let frames = try decoder.decode(
+          packet: UnsafeRawBufferPointer(rebasing: packet[..<byteCount]),
+          into: output
+        )
+        for frame in 0..<frames { decoded.append(output[frame * channelCount]) }
+      }
+      return decoded
+    }
+
+    func level(_ samples: [Float]) -> Float {
+      guard !samples.isEmpty else { return 0 }
+      return (samples.reduce(Float(0)) { $0 + $1 * $1 } / Float(samples.count)).squareRoot()
+    }
   }
 }

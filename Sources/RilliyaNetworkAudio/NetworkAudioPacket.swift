@@ -36,6 +36,12 @@ public enum NetworkAudioWireEncoding: UInt8, Equatable, Hashable, Sendable, Case
   /// One Opus packet, whose length is whatever the encoder produced.
   case opus = 2
 
+  /// One AAC Enhanced Low Delay packet.
+  case aacEnhancedLowDelay = 3
+
+  /// One AAC Low Delay packet.
+  case aacLowDelay = 4
+
   /// Whether a payload of `byteCount` bytes can carry `frameCount` frames of this format.
   func carries(payloadByteCount: Int, channelCount: Int, frameCount: Int) -> Bool {
     switch self {
@@ -46,8 +52,8 @@ public enum NetworkAudioWireEncoding: UInt8, Equatable, Hashable, Sendable, Case
         by: MemoryLayout<Float>.stride)
       guard !bytes.overflow else { return false }
       return payloadByteCount == bytes.partialValue
-    case .opus:
-      return (1...NetworkAudioOpus.maximumPacketByteCount).contains(payloadByteCount)
+    case .opus, .aacEnhancedLowDelay, .aacLowDelay:
+      return (1...NetworkAudioCodec.maximumPacketByteCount).contains(payloadByteCount)
     }
   }
 }
@@ -95,7 +101,7 @@ public struct NetworkAudioPacket: Equatable, Sendable {
         encoding == .interleavedFloat32
         ? try Self.payloadByteCount(
           channelCount: format.channelCount, frameCount: frameCount)
-        : NetworkAudioOpus.maximumPacketByteCount
+        : NetworkAudioCodec.maximumPacketByteCount
       throw NetworkAudioPacketError.payloadSizeMismatch(
         expected: expected,
         actual: payload.count

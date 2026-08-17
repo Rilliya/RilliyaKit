@@ -316,8 +316,8 @@ final class NetworkAudioPacketIngestor {
   private var cipher: NetworkAudioSessionCipher?
   private let reorderBuffer: NetworkAudioPacketReorderBuffer
   private var lastFrameCount = 0
-  /// Built when the first Opus packet says what block length the sender chose.
-  private var opusDecoder: NetworkAudioOpusDecoder?
+  /// Built when the first compressed packet says which format and block length the sender chose.
+  private var decoder: NetworkAudioCompressedDecoder?
   private var lastAcceptedTime: UInt64 = 0
 
   init(
@@ -332,7 +332,12 @@ final class NetworkAudioPacketIngestor {
       (configuration.maximumDatagramByteCount - NetworkAudioPacketCodec.headerByteCount)
       / configuration.format.channelCount / MemoryLayout<Float>.stride
     let compressedFrames =
-      NetworkAudioOpus.frameCounts(atSampleRate: configuration.format.sampleRate).max() ?? 0
+      NetworkAudioCodec.all.flatMap {
+        $0.frameCounts(
+          sampleRate: configuration.format.sampleRate,
+          channelCount: configuration.format.channelCount
+        )
+      }.max() ?? 0
     maximumFrameCount = max(uncompressedFrames, compressedFrames)
     let sampleCapacity = maximumFrameCount * configuration.format.channelCount
     reorderBuffer = try NetworkAudioPacketReorderBuffer(
@@ -389,8 +394,8 @@ final class NetworkAudioPacketIngestor {
     case .interleavedFloat32:
       decodePayload(packet.payload)
       decodedFrameCount = packet.frameCount
-    case .opus:
-      guard let frames = decodeOpus(packet) else {
+    case .opus, .aacEnhancedLowDelay, .aacLowDelay:
+      guard let frames = decodeCompressed(packet) else {
         increment(\Self.rejectedPacketCount)
         return .rejected
       }
@@ -460,31 +465,36 @@ final class NetworkAudioPacketIngestor {
   private func resetSession(to sessionID: UUID) {
     activeSessionID = sessionID
     reorderBuffer.reset()
-    resetOpusDecoder()
+    resetDecoder()
     lastFrameCount = 0
   }
 
-  /// Expands one Opus packet, building the decoder the first time a block length is seen.
+  /// Expands one compressed packet, building the decoder the first time a shape is seen.
   ///
-  /// The decoder looks ahead, so the opening packet of a stream yields fewer frames than it
-  /// carries. What it yields is what is written.
-  private func decodeOpus(_ packet: NetworkAudioPacket) -> Int? {
-    if opusDecoder?.frameCountPerPacket != packet.frameCount {
-      opusDecoder = try? NetworkAudioOpusDecoder(
-        sampleRate: packet.format.sampleRate,
-        channelCount: packet.format.channelCount,
-        frameCountPerPacket: packet.frameCount
-      )
+  /// A codec that looks ahead yields fewer frames from the opening packets than they carry. What
+  /// it yields is what is written.
+  private func decodeCompressed(_ packet: NetworkAudioPacket) -> Int? {
+    if decoder?.codec.encoding != packet.encoding
+      || decoder?.frameCountPerPacket != packet.frameCount
+    {
+      decoder = NetworkAudioCodec.codec(for: packet.encoding).flatMap {
+        try? NetworkAudioCompressedDecoder(
+          codec: $0,
+          sampleRate: packet.format.sampleRate,
+          channelCount: packet.format.channelCount,
+          frameCountPerPacket: packet.frameCount
+        )
+      }
     }
-    guard let opusDecoder, packet.frameCount <= maximumFrameCount else { return nil }
+    guard let decoder, packet.frameCount <= maximumFrameCount else { return nil }
     return try? packet.payload.withUnsafeBytes { bytes in
-      try opusDecoder.decode(packet: bytes, into: interleavedStorage)
+      try decoder.decode(packet: bytes, into: interleavedStorage)
     }
   }
 
   /// Drops the decoder along with everything else the previous session left behind.
-  private func resetOpusDecoder() {
-    opusDecoder = nil
+  private func resetDecoder() {
+    decoder = nil
   }
 
   private func decodePayload(_ payload: Data) {

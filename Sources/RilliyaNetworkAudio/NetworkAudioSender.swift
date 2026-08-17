@@ -110,25 +110,33 @@ public struct NetworkAudioSenderConfiguration: Equatable, Hashable, Sendable {
       } else {
         self.framesPerPacket = maximumFrames
       }
-    case .opus:
+    case .opus, .aacEnhancedLowDelay, .aacLowDelay:
       // A compressed block costs what the encoder makes of it, so the datagram no longer decides
-      // the length: Opus does, and it defines only a handful.
-      guard NetworkAudioOpus.supportedSampleRates.contains(format.sampleRate) else {
-        throw NetworkAudioSenderError.opus(.unsupportedSampleRate(format.sampleRate))
+      // the length: the codec does, and each defines only a handful.
+      guard let codec = NetworkAudioCodec.codec(for: encoding) else {
+        throw NetworkAudioSenderError.codec(.unavailable(0))
       }
-      guard NetworkAudioOpus.supportedChannelCounts.contains(format.channelCount) else {
-        throw NetworkAudioSenderError.opus(.unsupportedChannelCount(format.channelCount))
+      guard codec.supportedSampleRates.contains(format.sampleRate) else {
+        throw NetworkAudioSenderError.codec(.unsupportedSampleRate(format.sampleRate))
+      }
+      guard codec.supportedChannelCounts.contains(format.channelCount) else {
+        throw NetworkAudioSenderError.codec(.unsupportedChannelCount(format.channelCount))
       }
       let resolved =
         framesPerPacket
-        ?? NetworkAudioOpus.frameCount(
-          nearestTo: Self.preferredOpusBlockMilliseconds,
-          atSampleRate: format.sampleRate
+        ?? codec.frameCount(
+          nearestTo: Self.preferredBlockMilliseconds,
+          sampleRate: format.sampleRate,
+          channelCount: format.channelCount
         )
       guard let resolved,
-        NetworkAudioOpus.carries(frameCount: resolved, atSampleRate: format.sampleRate)
+        codec.carries(
+          frameCount: resolved,
+          sampleRate: format.sampleRate,
+          channelCount: format.channelCount
+        )
       else {
-        throw NetworkAudioSenderError.opus(.unsupportedFrameCount(framesPerPacket ?? 0))
+        throw NetworkAudioSenderError.codec(.unsupportedFrameCount(framesPerPacket ?? 0))
       }
       guard resolved <= capacityFrameCount else {
         throw NetworkAudioSenderError.invalidPacketFrameCount(resolved)
@@ -137,16 +145,16 @@ public struct NetworkAudioSenderConfiguration: Equatable, Hashable, Sendable {
     }
   }
 
-  /// The block length Opus is asked for when nothing else is said.
+  /// The block length a codec is asked for when nothing else is said.
   ///
-  /// Ten milliseconds is where Opus stops paying much per packet for its own overhead without
-  /// adding delay a listener notices.
-  static let preferredOpusBlockMilliseconds = 10.0
+  /// Ten milliseconds is where a codec stops paying much per packet for its own overhead without
+  /// adding delay a listener notices. A codec offering nothing that short reports what it has.
+  static let preferredBlockMilliseconds = 10.0
 
   /// The compressed bytes one packet may carry, which the datagram bound decides.
-  var maximumOpusPacketByteCount: Int {
+  var maximumCompressedPacketByteCount: Int {
     min(
-      NetworkAudioOpus.maximumPacketByteCount,
+      NetworkAudioCodec.maximumPacketByteCount,
       maximumDatagramByteCount - NetworkAudioPacketCodec.headerByteCount
         - (sharedKey == nil ? 0 : NetworkAudioSessionCipher.tagByteCount)
     )
@@ -184,8 +192,8 @@ public enum NetworkAudioSenderError: Error, Equatable, LocalizedError, Sendable 
   /// Network.framework rejected a datagram.
   case transport(NetworkAudioTransportFailure)
 
-  /// Opus cannot carry what this sender was asked to carry.
-  case opus(NetworkAudioOpusError)
+  /// The chosen wire format cannot carry what this sender was asked to carry.
+  case codec(NetworkAudioCodecError)
 
   /// Packet encoding rejected internally produced metadata.
   case packet(NetworkAudioPacketError)
@@ -197,7 +205,7 @@ public enum NetworkAudioSenderError: Error, Equatable, LocalizedError, Sendable 
       "The network audio destination host is empty or too long."
     case .invalidPort:
       "The network audio destination port must be between 1 and 65,535."
-    case .opus(let error):
+    case .codec(let error):
       error.errorDescription
     case .invalidDatagramBound:
       "The network audio packet bound must fit one complete frame and remain below 16,384 bytes."
@@ -392,12 +400,12 @@ private final class NetworkAudioSenderPacketizer: @unchecked Sendable {
   private let readOnlyPointers: [UnsafePointer<Float>]
   private let datagram: UnsafeMutableRawBufferPointer
   private let cipher: NetworkAudioSessionCipher?
-  private let opus: OpusStaging?
+  private let compression: CompressionStaging?
   private var sequence: UInt64 = 0
 
   /// What compressing a block needs beyond the planar channels already read.
-  private struct OpusStaging {
-    let encoder: NetworkAudioOpusEncoder
+  private struct CompressionStaging {
+    let encoder: NetworkAudioCompressedEncoder
     let interleaved: UnsafeMutablePointer<Float>
     let interleavedSampleCount: Int
     let packet: UnsafeMutableRawBufferPointer
@@ -425,22 +433,23 @@ private final class NetworkAudioSenderPacketizer: @unchecked Sendable {
         frameCount: configuration.framesPerPacket
       ) + NetworkAudioSessionCipher.tagByteCount
     let compressed =
-      NetworkAudioPacketCodec.headerByteCount + configuration.maximumOpusPacketByteCount
+      NetworkAudioPacketCodec.headerByteCount + configuration.maximumCompressedPacketByteCount
       + NetworkAudioSessionCipher.tagByteCount
     datagram = UnsafeMutableRawBufferPointer.allocate(
-      byteCount: configuration.encoding == .opus ? max(uncompressed, compressed) : uncompressed,
+      byteCount: configuration.encoding == .interleavedFloat32
+        ? uncompressed : max(uncompressed, compressed),
       alignment: MemoryLayout<UInt64>.alignment
     )
-    opus = Self.staging(for: configuration)
+    compression = Self.staging(for: configuration)
   }
 
   deinit {
     for pointer in channelStorage { pointer.deallocate() }
     datagram.deallocate()
-    guard let opus else { return }
-    opus.interleaved.deinitialize(count: opus.interleavedSampleCount)
-    opus.interleaved.deallocate()
-    opus.packet.deallocate()
+    guard let compression else { return }
+    compression.interleaved.deinitialize(count: compression.interleavedSampleCount)
+    compression.interleaved.deallocate()
+    compression.packet.deallocate()
   }
 
   /// Prepares compression, or nothing when the wire carries samples as they are.
@@ -450,9 +459,10 @@ private final class NetworkAudioSenderPacketizer: @unchecked Sendable {
   /// every packet rather than trapping here.
   private static func staging(
     for configuration: NetworkAudioSenderConfiguration
-  ) -> OpusStaging? {
-    guard configuration.encoding == .opus,
-      let encoder = try? NetworkAudioOpusEncoder(
+  ) -> CompressionStaging? {
+    guard let codec = NetworkAudioCodec.codec(for: configuration.encoding),
+      let encoder = try? NetworkAudioCompressedEncoder(
+        codec: codec,
         sampleRate: configuration.format.sampleRate,
         channelCount: configuration.format.channelCount,
         frameCountPerPacket: configuration.framesPerPacket,
@@ -462,12 +472,12 @@ private final class NetworkAudioSenderPacketizer: @unchecked Sendable {
     let sampleCount = configuration.framesPerPacket * configuration.format.channelCount
     let interleaved = UnsafeMutablePointer<Float>.allocate(capacity: sampleCount)
     interleaved.initialize(repeating: 0, count: sampleCount)
-    return OpusStaging(
+    return CompressionStaging(
       encoder: encoder,
       interleaved: interleaved,
       interleavedSampleCount: sampleCount,
       packet: UnsafeMutableRawBufferPointer.allocate(
-        byteCount: configuration.maximumOpusPacketByteCount,
+        byteCount: configuration.maximumCompressedPacketByteCount,
         alignment: 16
       )
     )
@@ -484,8 +494,8 @@ private final class NetworkAudioSenderPacketizer: @unchecked Sendable {
 
     let written: Int
     do {
-      if let opus {
-        written = try compress(opus, frameCount: frameCount)
+      if let compression {
+        written = try compress(compression, frameCount: frameCount)
       } else {
         written = try readOnlyPointers.withUnsafeBufferPointer {
           try NetworkAudioPacketCodec.encode(
@@ -511,21 +521,22 @@ private final class NetworkAudioSenderPacketizer: @unchecked Sendable {
   }
 
   /// Weaves the channels together, compresses them, and writes the datagram.
-  private func compress(_ opus: OpusStaging, frameCount: Int) throws -> Int {
+  private func compress(_ compression: CompressionStaging, frameCount: Int) throws -> Int {
     let channelCount = configuration.format.channelCount
     for frame in 0..<frameCount {
       for channel in 0..<channelCount {
-        opus.interleaved[frame * channelCount + channel] = channelStorage[channel][frame]
+        compression.interleaved[frame * channelCount + channel] = channelStorage[channel][frame]
       }
     }
-    let byteCount = try opus.encoder.encode(input: opus.interleaved, into: opus.packet)
+    let byteCount = try compression.encoder.encode(
+      input: compression.interleaved, into: compression.packet)
     return try NetworkAudioPacketCodec.encode(
       sessionID: configuration.sessionID,
       sequence: sequence,
       format: configuration.format,
       frameCount: frameCount,
-      encoding: .opus,
-      payload: UnsafeRawBufferPointer(rebasing: opus.packet[..<byteCount]),
+      encoding: configuration.encoding,
+      payload: UnsafeRawBufferPointer(rebasing: compression.packet[..<byteCount]),
       into: datagram,
       cipher: cipher
     )
