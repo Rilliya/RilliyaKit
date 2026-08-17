@@ -73,14 +73,16 @@ struct NetworkAudioPacketTests {
       // Holding nothing, so a gap is conceded the moment a later packet arrives.
       reorderDepth: 1
     )
-    let buffer = try AudioRealtimeFrameBuffer(
+    let distributor = try AudioRealtimeFrameDistributor(
       format: AudioProcessingFormat(sampleRate: 48_000, channelCount: 1),
       capacityFrameCount: 32
     )
     let ingestor = try NetworkAudioPacketIngestor(
       configuration: configuration,
-      frameBuffer: buffer
+      distributor: distributor
     )
+    // Nothing is published to a stream nobody is reading, so this test needs a destination.
+    let destination = try distributor.subscribe()
     let firstSession = UUID()
     let secondSession = UUID()
 
@@ -103,7 +105,7 @@ struct NetworkAudioPacketTests {
       ) == .accepted(frameCount: 2)
     )
 
-    #expect(read(buffer, frameCount: 6) == [0.25, 0.5, 0, 0, 0.75, 1])
+    #expect(read(destination, frameCount: 6) == [0.25, 0.5, 0, 0, 0.75, 1])
     let statistics = ingestor.statistics()
     #expect(statistics.acceptedPacketCount == 2)
     #expect(statistics.foreignSessionPacketCount == 1)
@@ -135,7 +137,7 @@ private func payload(_ samples: [Float]) -> Data {
   return data
 }
 
-private func read(_ buffer: AudioRealtimeFrameBuffer, frameCount: Int) -> [Float] {
+private func read(_ destination: AudioRealtimeFrameSubscription, frameCount: Int) -> [Float] {
   let storage = UnsafeMutablePointer<Float>.allocate(capacity: frameCount)
   storage.initialize(repeating: .nan, count: frameCount)
   defer {
@@ -143,7 +145,7 @@ private func read(_ buffer: AudioRealtimeFrameBuffer, frameCount: Int) -> [Float
     storage.deallocate()
   }
   [storage].withUnsafeBufferPointer {
-    _ = buffer.read(into: $0, frameCount: frameCount)
+    _ = destination.read(into: $0, frameCount: frameCount)
   }
   return Array(UnsafeBufferPointer(start: storage, count: frameCount))
 }

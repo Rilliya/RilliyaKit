@@ -184,6 +184,14 @@ public final class AudioJitterBuffer: @unchecked Sendable {
   /// The controls in effect.
   public let configuration: AudioJitterBufferConfiguration
 
+  /// Whatever must outlive this buffer for ``frameBuffer`` to stay its own.
+  ///
+  /// A queue vended by an ``AudioRealtimeFrameDistributor`` belongs to a subscription slot that is
+  /// recycled once the subscription is released. Holding the subscription here, where nothing else
+  /// can reach it to cancel, is what stops a released slot from being handed to another subscriber
+  /// while this buffer is still reading it.
+  private let queueOwner: AnyObject?
+
   private let minimumFrameCount: Int
   private let maximumFrameCount: Int
   private let underrunPenaltyFrameCount: Int
@@ -202,11 +210,26 @@ public final class AudioJitterBuffer: @unchecked Sendable {
   private var silentReadFrameCount = 0
 
   /// Prepares a jitter buffer over an existing receive queue.
-  public init(
+  public convenience init(
     frameBuffer: AudioRealtimeFrameBuffer,
     configuration: AudioJitterBufferConfiguration = .localNetwork,
     maximumFrameCount: Int = 4_096
   ) throws {
+    try self.init(
+      frameBuffer: frameBuffer,
+      queueOwner: nil,
+      configuration: configuration,
+      maximumFrameCount: maximumFrameCount
+    )
+  }
+
+  init(
+    frameBuffer: AudioRealtimeFrameBuffer,
+    queueOwner: AnyObject?,
+    configuration: AudioJitterBufferConfiguration = .localNetwork,
+    maximumFrameCount: Int = 4_096
+  ) throws {
+    self.queueOwner = queueOwner
     let sampleRate = frameBuffer.format.sampleRate
     func frames(_ duration: Duration) -> Int {
       Int((Double(duration.wholeNanoseconds) / 1_000_000_000 * sampleRate).rounded())

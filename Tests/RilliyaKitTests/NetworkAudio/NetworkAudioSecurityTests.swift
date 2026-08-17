@@ -436,7 +436,7 @@ struct NetworkAudioEncryptedIngestTests {
     init(receiverKey: NetworkAudioSharedKey?, senderKey: NetworkAudioSharedKey?) throws {
       format = try NetworkAudioStreamFormat(
         sampleRate: 48_000, channelCount: Fixture.channelCount)
-      let frameBuffer = try AudioRealtimeFrameBuffer(
+      let distributor = try AudioRealtimeFrameDistributor(
         format: AudioProcessingFormat(sampleRate: 48_000, channelCount: Fixture.channelCount),
         capacityFrameCount: 32_768
       )
@@ -447,7 +447,7 @@ struct NetworkAudioEncryptedIngestTests {
           keyProvider: receiverKey.map(NetworkAudioStaticKeyProvider.init)
         ),
         sharedKey: receiverKey,
-        frameBuffer: frameBuffer
+        distributor: distributor
       )
       cipher = senderKey.map {
         NetworkAudioSessionCipher(sharedKey: $0, sessionID: Fixture.sessionID)

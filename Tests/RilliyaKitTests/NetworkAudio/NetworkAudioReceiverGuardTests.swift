@@ -20,12 +20,12 @@ struct NetworkAudioReceiverGuardTests {
   @Test("A block that cannot be decoded is counted rather than passed over")
   func undecodableBlockIsCounted() throws {
     let format = try NetworkAudioStreamFormat(sampleRate: 48_000, channelCount: 2)
-    let frameBuffer = try AudioRealtimeFrameBuffer(
+    let distributor = try AudioRealtimeFrameDistributor(
       format: AudioProcessingFormat(sampleRate: 48_000, channelCount: 2)
     )
     let ingestor = try NetworkAudioPacketIngestor(
       configuration: try NetworkAudioReceiverConfiguration(port: 49_501, format: format),
-      frameBuffer: frameBuffer
+      distributor: distributor
     )
     // Apple Lossless without the configuration its decoder needs: a whole block, undecodable.
     let codec = NetworkAudioCodec.appleLossless
@@ -46,7 +46,7 @@ struct NetworkAudioReceiverGuardTests {
     if case .accepted = outcome {
       Issue.record("a block with no configuration was accepted as audio")
     }
-    #expect(frameBuffer.statistics().writtenFrameCount == 0)
+    #expect(ingestor.statistics().publishedFrameCount == 0)
   }
 
   /// Nothing may reach the queue once a receiver is stopped.
@@ -80,7 +80,7 @@ struct NetworkAudioReceiverGuardTests {
     let afterStop = receiver.statistics()
     #expect(afterStop.acceptedPacketCount == whileRunning.acceptedPacketCount)
     #expect(
-      afterStop.frameBuffer.writtenFrameCount == whileRunning.frameBuffer.writtenFrameCount,
+      afterStop.publishedFrameCount == whileRunning.publishedFrameCount,
       "a stopped receiver went on writing audio"
     )
   }

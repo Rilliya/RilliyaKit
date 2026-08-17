@@ -54,6 +54,13 @@ public struct NetworkAudioReceiverConfiguration: Sendable {
   /// unencrypted datagrams, so reaching the port is not enough to be heard.
   public let keyProvider: (any NetworkAudioKeyProvider)?
 
+  /// How many destinations may read this stream at once, each on its own clock.
+  ///
+  /// One received stream commonly feeds several places at once — headphones, a virtual device, a
+  /// recording. Each reads on a different clock, so each needs its own queue and its own measured
+  /// latency; sharing one would make every destination's timing everyone else's problem.
+  public let maximumDestinationCount: Int
+
   /// Creates validated receiver controls with bounded packet and PCM storage.
   public init(
     port: UInt16,
@@ -66,6 +73,7 @@ public struct NetworkAudioReceiverConfiguration: Sendable {
     reorderDepth: Int = 8,
     requestsRetransmission: Bool = true,
     waveformUpdatesPerSecond: Int = AudioWaveformMeter.defaultUpdatesPerSecond,
+    maximumDestinationCount: Int = 8,
     keyProvider: (any NetworkAudioKeyProvider)? = nil
   ) throws {
     guard port > 0 else { throw NetworkAudioReceiverError.invalidPort }
@@ -89,6 +97,12 @@ public struct NetworkAudioReceiverConfiguration: Sendable {
     guard (1...Self.maximumReorderDepth).contains(reorderDepth) else {
       throw NetworkAudioReceiverError.invalidReorderDepth
     }
+    guard
+      (1...AudioRealtimeFrameDistributor.maximumSubscriberCountLimit)
+        .contains(maximumDestinationCount)
+    else {
+      throw NetworkAudioReceiverError.invalidDestinationCount
+    }
     self.port = port
     self.format = format
     self.capacityFrameCount = capacityFrameCount
@@ -98,6 +112,7 @@ public struct NetworkAudioReceiverConfiguration: Sendable {
     self.reorderDepth = reorderDepth
     self.requestsRetransmission = requestsRetransmission
     self.waveformUpdatesPerSecond = waveformUpdatesPerSecond
+    self.maximumDestinationCount = maximumDestinationCount
     self.keyProvider = keyProvider
   }
 }
@@ -119,6 +134,9 @@ public enum NetworkAudioReceiverError: Error, Equatable, LocalizedError, Sendabl
   /// The reorder window is outside the bounded policy.
   case invalidReorderDepth
 
+  /// The destination bound is outside what the distributor can prepare.
+  case invalidDestinationCount
+
   /// A stopped receiver cannot be started again.
   case alreadyStopped
 
@@ -138,6 +156,8 @@ public enum NetworkAudioReceiverError: Error, Equatable, LocalizedError, Sendabl
       "The network audio session takeover interval must be between zero and 60 seconds."
     case .invalidReorderDepth:
       "The network audio reorder window must be between 1 and 64 packets."
+    case .invalidDestinationCount:
+      "The network audio receiver must allow between 1 and 64 destinations."
     case .alreadyStopped:
       "A stopped network audio receiver cannot be restarted."
     case .transport(let failure):
@@ -176,13 +196,22 @@ public struct NetworkAudioReceiverStatistics: Equatable, Sendable {
   /// sender that simply stopped.
   public let undecodablePacketCount: UInt64
 
-  /// Current bounded PCM queue diagnostics.
-  public let frameBuffer: AudioRealtimeFrameBufferStatistics
+  /// Frames the ingestor published, whether or not anything was reading them.
+  ///
+  /// Counted at the source rather than at a queue: with no destination reading, every queue is
+  /// legitimately empty, and a stopped receiver has to be distinguishable from an unread one.
+  public let publishedFrameCount: UInt64
+
+  /// How many destinations are reading this stream.
+  public let destinationCount: Int
+
+  /// The frames queued for whichever destination has fewest, or zero when none is reading.
+  public let smallestQueuedFrameCount: Int
 }
 
 /// Receives one versioned direct UDP audio session into a bounded realtime buffer.
 ///
-/// Every datagram is length- and format-validated before its samples reach ``frameBuffer``, and
+/// Every datagram is length- and format-validated before its samples reach ``distributor``, and
 /// malformed traffic is discarded. Confidentiality and peer authentication come from
 /// ``NetworkAudioReceiverConfiguration/keyProvider`` and are absent without one: UDP itself offers
 /// neither, so an unkeyed session can be read and written by anything that can reach the port.
@@ -194,13 +223,18 @@ public final class NetworkAudioReceiver: @unchecked Sendable {
   /// The immutable receiver controls.
   public let configuration: NetworkAudioReceiverConfiguration
 
-  /// The single-consumer PCM queue the ingestor fills.
-  public let frameBuffer: AudioRealtimeFrameBuffer
+  /// The decoded PCM every destination is served from.
+  ///
+  /// One received stream regularly feeds several destinations at once, and each reads on its own
+  /// clock. Publishing into per-destination queues is what keeps them independent: a destination
+  /// that stalls empties only its own queue, and the latency one of them settles at is not a
+  /// latency the others have to live with.
+  public let distributor: AudioRealtimeFrameDistributor
 
   /// What the stream currently sounds like, one entry per channel.
   ///
   /// Read whenever something wants to draw it. This is the only view of a network stream that
-  /// does not consume it: reading ``frameBuffer`` or ``jitterBuffer`` takes the audio away from
+  /// does not consume it: a jitter buffer handed out by ``subscribeWithJitterBuffer()`` takes the
   /// whatever is playing it.
   public func meterSnapshot() -> [AudioChannelMeterSnapshot] {
     ingestor.meter.snapshot()
@@ -217,11 +251,17 @@ public final class NetworkAudioReceiver: @unchecked Sendable {
   /// How many connections this receiver is holding, which a stopped one holds none of.
   var trackedConnectionCount: Int { lock.withLock { connections.count } }
 
-  /// The paced view of ``frameBuffer`` a prepared graph reads.
+  /// Claims one destination's paced view of this stream.
   ///
-  /// Reading the queue directly drains it to empty, which turns every late packet into a gap and
-  /// leaves the inserted silence behind as delay.
-  public let jitterBuffer: AudioJitterBuffer
+  /// Reading a queue directly drains it to empty, which turns every late packet into a gap and
+  /// leaves the inserted silence behind as delay, so every destination reads through one of these.
+  /// Each call claims a queue of its own; releasing the returned buffer releases it again.
+  ///
+  /// - Throws: ``AudioRealtimeFrameDistributorError/subscriberLimitReached`` once
+  ///   ``NetworkAudioReceiverConfiguration/maximumDestinationCount`` destinations are reading.
+  public func subscribeWithJitterBuffer() throws -> AudioJitterBuffer {
+    try distributor.subscribeWithJitterBuffer(configuration: configuration.jitter)
+  }
 
   private enum State {
     case ready
@@ -247,20 +287,17 @@ public final class NetworkAudioReceiver: @unchecked Sendable {
   ) throws {
     self.configuration = configuration
     self.failureHandler = failureHandler
-    frameBuffer = try AudioRealtimeFrameBuffer(
+    distributor = try AudioRealtimeFrameDistributor(
       format: AudioProcessingFormat(
         sampleRate: configuration.format.sampleRate,
         channelCount: configuration.format.channelCount
       ),
-      capacityFrameCount: configuration.capacityFrameCount
-    )
-    jitterBuffer = try AudioJitterBuffer(
-      frameBuffer: frameBuffer,
-      configuration: configuration.jitter
+      capacityFrameCount: configuration.capacityFrameCount,
+      maximumSubscriberCount: configuration.maximumDestinationCount
     )
     ingestor = try NetworkAudioPacketIngestor(
       configuration: configuration,
-      frameBuffer: frameBuffer
+      distributor: distributor
     )
   }
 
@@ -389,7 +426,7 @@ enum NetworkAudioPacketIngestResult: Equatable {
 
 final class NetworkAudioPacketIngestor {
   private let configuration: NetworkAudioReceiverConfiguration
-  private let frameBuffer: AudioRealtimeFrameBuffer
+  private let distributor: AudioRealtimeFrameDistributor
   private let interleavedStorage: UnsafeMutablePointer<Float>
   private let silenceStorage: UnsafeMutablePointer<Float>
   private let maximumFrameCount: Int
@@ -421,6 +458,7 @@ final class NetworkAudioPacketIngestor {
   private var retransmissionRequestCount: UInt64 = 0
   private var retransmissionRecoveredCount: UInt64 = 0
   private var undecodablePacketCount: UInt64 = 0
+  private var publishedFrameCount: UInt64 = 0
   /// The key this run was given, or `nil` while the stream is in the clear.
   private var resolvedSharedKey: NetworkAudioSharedKey?
   private var lastAcceptedTime: UInt64 = 0
@@ -428,11 +466,11 @@ final class NetworkAudioPacketIngestor {
   init(
     configuration: NetworkAudioReceiverConfiguration,
     sharedKey: NetworkAudioSharedKey? = nil,
-    frameBuffer: AudioRealtimeFrameBuffer
+    distributor: AudioRealtimeFrameDistributor
   ) throws {
     self.configuration = configuration
     self.resolvedSharedKey = sharedKey
-    self.frameBuffer = frameBuffer
+    self.distributor = distributor
     // Uncompressed, a datagram's size bounds the block it can carry. Compressed, it does not:
     // one small datagram can carry the longest block Opus defines, so storage covers both.
     let uncompressedFrames =
@@ -563,22 +601,14 @@ final class NetworkAudioPacketIngestor {
       sequence: packet.sequence,
       samples: interleavedStorage,
       frameCount: decodedFrameCount
-    ) { [frameBuffer, configuration] samples, frameCount in
+    ) { [distributor, configuration] samples, frameCount in
       guard frameCount > 0 else { return }
       if let samples {
-        _ = frameBuffer.writeInterleaved(
-          samples,
-          channelCount: configuration.format.channelCount,
-          frameCount: frameCount
-        )
+        self.publish(samples, frameCount: frameCount)
         self.meter.submit(interleaved: samples, frameCount: frameCount)
       } else {
         missing &+= 1
-        _ = frameBuffer.writeInterleaved(
-          self.silenceStorage,
-          channelCount: configuration.format.channelCount,
-          frameCount: frameCount
-        )
+        self.publish(self.silenceStorage, frameCount: frameCount)
       }
     }
     if missing > 0 { add(missing, to: \Self.missingPacketCount) }
@@ -606,7 +636,9 @@ final class NetworkAudioPacketIngestor {
         retransmissionRequestCount: retransmissionRequestCount,
         retransmissionRecoveredCount: retransmissionRecoveredCount,
         undecodablePacketCount: undecodablePacketCount,
-        frameBuffer: frameBuffer.statistics()
+        publishedFrameCount: publishedFrameCount,
+        destinationCount: distributor.activeSubscriberCount,
+        smallestQueuedFrameCount: distributor.minimumAvailableFrameCount ?? 0
       )
     }
   }
@@ -622,7 +654,7 @@ final class NetworkAudioPacketIngestor {
   /// Holds what the provider gave this run, so nothing has to ask again per datagram.
   ///
   /// A receiver resolves before it starts and calls this; a caller driving the ingestor directly
-  /// hands the key to ``init(configuration:sharedKey:frameBuffer:)`` instead.
+  /// hands the key to ``init(configuration:sharedKey:distributor:)`` instead.
   func useSharedKey(_ key: NetworkAudioSharedKey?) {
     statisticsLock.withLock { resolvedSharedKey = key }
   }
@@ -647,16 +679,22 @@ final class NetworkAudioPacketIngestor {
     lastFrameCount = 0
   }
 
+  /// Publishes one decoded quantum to every destination and counts it once.
+  private func publish(_ samples: UnsafePointer<Float>, frameCount: Int) {
+    _ = distributor.writeInterleaved(
+      samples,
+      channelCount: configuration.format.channelCount,
+      frameCount: frameCount
+    )
+    statisticsLock.withLock { publishedFrameCount += UInt64(frameCount) }
+  }
+
   /// Writes what the decoder produced straight to the queue.
   ///
   /// A reassembled block is already in order, so it does not pass through the reorder buffer.
   private func writeDecoded(frameCount: Int) {
     guard frameCount > 0 else { return }
-    _ = frameBuffer.writeInterleaved(
-      interleavedStorage,
-      channelCount: configuration.format.channelCount,
-      frameCount: frameCount
-    )
+    publish(interleavedStorage, frameCount: frameCount)
     meter.submit(interleaved: interleavedStorage, frameCount: frameCount)
   }
 
@@ -716,7 +754,9 @@ final class NetworkAudioPacketIngestor {
       missing += reorderBuffer.missingSequences(limit: limit - missing.count)
     }
     guard !missing.isEmpty else { return nil }
-    let queuedFrames = frameBuffer.statistics().availableFrameCount
+    // The destination closest to running dry decides how urgent a gap is. With nothing reading,
+    // there is no deadline to beat and no reason to spend a request.
+    guard let queuedFrames = distributor.minimumAvailableFrameCount else { return nil }
     let queued = Duration.nanoseconds(
       Int64(Double(queuedFrames) / configuration.format.sampleRate * 1_000_000_000))
     return statisticsLock.withLock { () -> NetworkAudioRetransmissionRequest? in

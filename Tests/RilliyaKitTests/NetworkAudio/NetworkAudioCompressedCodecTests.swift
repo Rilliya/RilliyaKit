@@ -371,7 +371,7 @@ struct NetworkAudioOpusWireTests {
       sampleRate: Fixture.sampleRate,
       channelCount: Fixture.channelCount
     )
-    let frameBuffer = try AudioRealtimeFrameBuffer(
+    let distributor = try AudioRealtimeFrameDistributor(
       format: AudioProcessingFormat(
         sampleRate: Fixture.sampleRate,
         channelCount: Fixture.channelCount
@@ -384,7 +384,7 @@ struct NetworkAudioOpusWireTests {
         format: format,
         capacityFrameCount: 32_768
       ),
-      frameBuffer: frameBuffer
+      distributor: distributor
     )
     let encoder = try NetworkAudioCompressedEncoder(
       codec: .opus,
@@ -424,8 +424,8 @@ struct NetworkAudioOpusWireTests {
     #expect(accepted == 20)
     let statistics = ingestor.statistics()
     #expect(statistics.rejectedPacketCount == 0)
-    // Every block but the decoder's first reaches the queue in full.
-    #expect(statistics.frameBuffer.writtenFrameCount > UInt64(Fixture.frameCount * 18))
+    // Every block but the decoder's first is published in full.
+    #expect(statistics.publishedFrameCount > UInt64(Fixture.frameCount * 18))
   }
 
   private func encode(

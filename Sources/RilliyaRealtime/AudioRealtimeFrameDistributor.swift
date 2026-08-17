@@ -131,6 +131,19 @@ public final class AudioRealtimeFrameDistributor: @unchecked Sendable {
     }
   }
 
+  /// How many subscriptions are reading right now.
+  public var activeSubscriberCount: Int {
+    slots.reduce(0) { $0 + ($1.isClaimed ? 1 : 0) }
+  }
+
+  /// The frames queued for whichever reader has fewest, or `nil` when nothing is reading.
+  ///
+  /// The reader closest to running dry is the one that decides how urgent a gap is, so this is
+  /// what a producer asks when it has to decide whether there is still time to recover one.
+  public var minimumAvailableFrameCount: Int? {
+    slots.lazy.filter(\.isClaimed).map(\.availableFrameCount).min()
+  }
+
   /// Claims one independently paced subscriber queue.
   ///
   /// Subscription management may lock and must not run on an audio callback. Cancelling a
@@ -142,6 +155,33 @@ public final class AudioRealtimeFrameDistributor: @unchecked Sendable {
         return AudioRealtimeFrameSubscription(slot: slot, generation: generation)
       }
       throw AudioRealtimeFrameDistributorError.subscriberLimitReached(maximumSubscriberCount)
+    }
+  }
+
+  /// Claims one subscriber queue and paces it against the reader's own clock.
+  ///
+  /// What a network source has to give several destinations at once. Each one reads on a different
+  /// clock, so each needs its own measured target: a single jitter buffer can only hold the amount
+  /// that suits one reader, and correcting the queue for that reader is wrong for every other.
+  ///
+  /// The subscription stays inside the returned buffer. Nothing else can reach it to cancel, so the
+  /// slot cannot be released and handed to another subscriber while this buffer is still reading
+  /// it; releasing the buffer releases the slot.
+  public func subscribeWithJitterBuffer(
+    configuration: AudioJitterBufferConfiguration = .localNetwork,
+    maximumFrameCount: Int = 4_096
+  ) throws -> AudioJitterBuffer {
+    let subscription = try subscribe()
+    do {
+      return try AudioJitterBuffer(
+        frameBuffer: subscription.frameBuffer,
+        queueOwner: subscription,
+        configuration: configuration,
+        maximumFrameCount: maximumFrameCount
+      )
+    } catch {
+      subscription.cancel()
+      throw error
     }
   }
 
@@ -306,6 +346,10 @@ public final class AudioRealtimeFrameSubscription: @unchecked Sendable {
 
 private final class AudioRealtimeFrameDistributionSlot: @unchecked Sendable {
   let frameBuffer: AudioRealtimeFrameBuffer
+
+  var isClaimed: Bool { active.load(ordering: .acquiring) }
+
+  var availableFrameCount: Int { frameBuffer.statistics().availableFrameCount }
 
   private let active = ManagedAtomic<Bool>(false)
   private let generation = ManagedAtomic<UInt64>(0)

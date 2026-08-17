@@ -223,7 +223,7 @@ struct NetworkAudioLosslessWireTests {
       codec.frameCount(nearestTo: 10, sampleRate: Fixture.sampleRate, channelCount: 2))
     let format = try NetworkAudioStreamFormat(
       sampleRate: Fixture.sampleRate, channelCount: Fixture.channelCount)
-    let frameBuffer = try AudioRealtimeFrameBuffer(
+    let distributor = try AudioRealtimeFrameDistributor(
       format: AudioProcessingFormat(
         sampleRate: Fixture.sampleRate, channelCount: Fixture.channelCount),
       capacityFrameCount: 65_536
@@ -234,7 +234,7 @@ struct NetworkAudioLosslessWireTests {
         format: format,
         capacityFrameCount: 65_536
       ),
-      frameBuffer: frameBuffer
+      distributor: distributor
     )
     let encoder = try NetworkAudioCompressedEncoder(
       codec: codec,
@@ -309,7 +309,7 @@ struct NetworkAudioLosslessWireTests {
     #expect(statistics.rejectedPacketCount == 0)
     // Every block but the codec's first reaches the queue whole.
     #expect(
-      statistics.frameBuffer.writtenFrameCount >= UInt64((blocksSent - 2) * frameCount)
+      statistics.publishedFrameCount >= UInt64((blocksSent - 2) * frameCount)
     )
   }
 

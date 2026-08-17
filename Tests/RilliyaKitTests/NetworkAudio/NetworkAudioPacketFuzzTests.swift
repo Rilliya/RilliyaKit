@@ -178,7 +178,7 @@ struct NetworkAudioPacketFuzzTests {
     // by the uncompressed block alone and is smaller than a datagram. Channel counts a codec does
     // carry hide the overrun behind the larger compressed bound.
     let wide = try NetworkAudioStreamFormat(sampleRate: 48_000, channelCount: 7)
-    let frameBuffer = try AudioRealtimeFrameBuffer(
+    let distributor = try AudioRealtimeFrameDistributor(
       format: AudioProcessingFormat(sampleRate: 48_000, channelCount: 7)
     )
     let ingestor = try NetworkAudioPacketIngestor(
@@ -187,7 +187,7 @@ struct NetworkAudioPacketFuzzTests {
         format: wide,
         maximumDatagramByteCount: 1_195
       ),
-      frameBuffer: frameBuffer
+      distributor: distributor
     )
     let forged = try Self.forgedWideFragment(sessionID: compressed.sessionID, format: wide)
     let outcome = ingestor.ingest(forged, now: 0)
@@ -195,7 +195,7 @@ struct NetworkAudioPacketFuzzTests {
     if case .accepted = outcome {
       Issue.record("a forged uncompressed fragment was accepted")
     }
-    #expect(frameBuffer.statistics().writtenFrameCount == 0)
+    #expect(distributor.minimumAvailableFrameCount == nil)
   }
 
   /// One datagram claiming samples, the fragmented flag, and a payload far longer than seven
@@ -223,13 +223,14 @@ struct NetworkAudioPacketFuzzTests {
   @Test("The ingestor survives hostile datagrams without writing unclaimed frames")
   func ingestorSurvivesHostileDatagrams() throws {
     let format = try NetworkAudioStreamFormat(sampleRate: 48_000, channelCount: 2)
-    let frameBuffer = try AudioRealtimeFrameBuffer(
+    let distributor = try AudioRealtimeFrameDistributor(
       format: AudioProcessingFormat(sampleRate: 48_000, channelCount: 2)
     )
     let ingestor = try NetworkAudioPacketIngestor(
       configuration: try NetworkAudioReceiverConfiguration(port: 48_620, format: format),
-      frameBuffer: frameBuffer
+      distributor: distributor
     )
+    let destination = try distributor.subscribe()
     var random = SplitMix64(seed: Corpus.seed)
     let valid = try NetworkAudioPacketCodec.encode(try validPacket())
     var acceptedFrames = 0
@@ -257,9 +258,11 @@ struct NetworkAudioPacketFuzzTests {
         + statistics.foreignSessionPacketCount + statistics.stalePacketCount
         == UInt64(Corpus.arbitraryDatagramCount))
     #expect(acceptedFrames >= 0)
+    // Bounded storage is what stops a hostile stream from growing memory: whatever a destination
+    // was handed never exceeds its queue plus whatever it has already taken away.
+    let queue = destination.statistics().frameBuffer
     #expect(
-      statistics.frameBuffer.writtenFrameCount <= UInt64(frameBuffer.capacityFrameCount)
-        + statistics.frameBuffer.readFrameCount)
+      queue.writtenFrameCount <= UInt64(distributor.capacityFrameCount) + queue.readFrameCount)
   }
 
   private func validPacket() throws -> NetworkAudioPacket {
