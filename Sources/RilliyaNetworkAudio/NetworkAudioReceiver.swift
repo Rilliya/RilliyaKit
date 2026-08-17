@@ -2,6 +2,7 @@
 
 import Foundation
 import Network
+import RilliyaCore
 import RilliyaRealtime
 
 /// Bounded controls for one direct UDP network-audio receiver.
@@ -188,6 +189,15 @@ public final class NetworkAudioReceiver: @unchecked Sendable {
   /// The single-consumer PCM queue the ingestor fills.
   public let frameBuffer: AudioRealtimeFrameBuffer
 
+  /// What the stream currently sounds like, one entry per channel.
+  ///
+  /// Read whenever something wants to draw it. This is the only view of a network stream that
+  /// does not consume it: reading ``frameBuffer`` or ``jitterBuffer`` takes the audio away from
+  /// whatever is playing it.
+  public func meterSnapshot() -> [AudioChannelMeterSnapshot] {
+    ingestor.meter.snapshot()
+  }
+
   /// The paced view of ``frameBuffer`` a prepared graph reads.
   ///
   /// Reading the queue directly drains it to empty, which turns every late packet into a gap and
@@ -349,6 +359,12 @@ final class NetworkAudioPacketIngestor {
   private let maximumFrameCount: Int
   /// The samples ``interleavedStorage`` holds, which bounds every write into it.
   private let sampleCapacity: Int
+  /// Publishes what reaches the queue, so an interface can draw a stream it cannot otherwise see.
+  let meter: AudioWaveformMeter
+  /// Names this stream's channels.
+  ///
+  /// Nothing reads it but the identity a channel snapshot carries, which has to name something.
+  private let streamID = UUID()
   private let statisticsLock = NSLock()
   private var acceptedPacketCount: UInt64 = 0
   private var rejectedPacketCount: UInt64 = 0
@@ -403,6 +419,15 @@ final class NetworkAudioPacketIngestor {
       maximumFragmentByteCount: configuration.maximumDatagramByteCount
     )
     self.sampleCapacity = sampleCapacity
+    let streamID = self.streamID
+    meter = AudioWaveformMeter(
+      channelIDs: (0..<configuration.format.channelCount).compactMap { index in
+        AudioChannelIndex(rawValue: index).map {
+          AudioChannelID(ownerID: .source(.stream(streamID)), index: $0)
+        }
+      },
+      sampleRate: configuration.format.sampleRate
+    )
     interleavedStorage = .allocate(capacity: sampleCapacity)
     // Initialized rather than left raw: anything that reads further than the last packet wrote
     // then reads silence instead of whatever the heap happened to hold.
@@ -504,6 +529,7 @@ final class NetworkAudioPacketIngestor {
           channelCount: configuration.format.channelCount,
           frameCount: frameCount
         )
+        self.meter.submit(interleaved: samples, frameCount: frameCount)
       } else {
         missing &+= 1
         _ = frameBuffer.writeInterleaved(
@@ -581,6 +607,7 @@ final class NetworkAudioPacketIngestor {
       channelCount: configuration.format.channelCount,
       frameCount: frameCount
     )
+    meter.submit(interleaved: interleavedStorage, frameCount: frameCount)
   }
 
   /// Expands one compressed packet, building the decoder the first time a shape is seen.

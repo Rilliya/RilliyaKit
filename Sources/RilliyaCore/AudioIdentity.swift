@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import Foundation
+
 /// The direction in which audio moves through a device.
 public enum AudioDirection: String, CaseIterable, Hashable, Sendable {
   /// Audio entering the system from a device.
@@ -90,6 +92,13 @@ public enum AudioSourceID: Hashable, Sendable {
 
   /// The mixed process audio destined for an output device.
   case deviceOutput(AudioDeviceID)
+
+  /// Audio a host produces itself, with no device or process behind it.
+  ///
+  /// A network stream, a file being played, a generated signal. These carry channels like any
+  /// other source and have to be nameable, or nothing that reads a channel by its identity — a
+  /// meter, a level, a drawn waveform — can say anything about them.
+  case stream(UUID)
 }
 
 /// The identity of an audio destination that can receive routed audio.

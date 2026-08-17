@@ -159,3 +159,64 @@ struct NetworkAudioSenderTests {
     )
   }
 }
+
+/// A network stream has no capture device to meter it, so the receiver meters what it writes —
+/// otherwise nothing can draw a stream that is audibly playing.
+@Suite("Network audio metering")
+struct NetworkAudioMeteringTests {
+  @Test("A receiver reports what it is putting out")
+  func receiverPublishesAWaveform() async throws {
+    let format = try NetworkAudioStreamFormat(sampleRate: 48_000, channelCount: 2)
+    let receiver = try NetworkAudioReceiver(
+      configuration: try NetworkAudioReceiverConfiguration(port: 48_993, format: format)
+    )
+    let sender = try NetworkAudioSender(
+      configuration: try NetworkAudioSenderConfiguration(
+        host: "127.0.0.1", port: 48_993, format: format)
+    )
+
+    #expect(receiver.meterSnapshot().isEmpty, "nothing has arrived yet")
+
+    try receiver.start()
+    try sender.start()
+    defer {
+      Task {
+        await sender.stop()
+        receiver.stop()
+      }
+    }
+
+    let quantum = 512
+    var left = [Float](repeating: 0, count: quantum)
+    var right = [Float](repeating: 0, count: quantum)
+    var phase = 0.0
+    for _ in 0..<60 {
+      for frame in 0..<quantum {
+        left[frame] = Float(0.25 * sin(phase))
+        right[frame] = Float(0.25 * sin(phase))
+        phase += 2 * .pi * 440 / 48_000
+      }
+      left.withUnsafeBufferPointer { l in
+        right.withUnsafeBufferPointer { r in
+          guard let lb = l.baseAddress, let rb = r.baseAddress else { return }
+          [lb, rb].withUnsafeBufferPointer { channels in
+            _ = sender.frameBuffer.writePlanar(channels, frameCount: quantum)
+          }
+        }
+      }
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    try await Task.sleep(for: .milliseconds(200))
+
+    let snapshot = receiver.meterSnapshot()
+
+    #expect(snapshot.count == 2, "a channel per channel of the stream")
+    for channel in snapshot {
+      #expect(!channel.waveform.isEmpty)
+      #expect(channel.rootMeanSquare > 0.05, "the stream metered as silence")
+      #expect(channel.waveform.contains { abs($0) > 0.1 })
+    }
+    // The channels are named apart, which is what lets each be drawn on its own.
+    #expect(Set(snapshot.map(\.channelID.index.rawValue)) == [0, 1])
+  }
+}

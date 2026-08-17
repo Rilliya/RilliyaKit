@@ -2,16 +2,16 @@
 
 import Foundation
 
-struct AudioMeterMeasurement: Equatable, Sendable {
-  let rootMeanSquare: Float
-  let peak: Float
-  let decibels: Float
-  let isClipping: Bool
-  let waveform: [Float]
+package struct AudioMeterMeasurement: Equatable, Sendable {
+  package let rootMeanSquare: Float
+  package let peak: Float
+  package let decibels: Float
+  package let isClipping: Bool
+  package let waveform: [Float]
 }
 
-enum AudioMeterDSP {
-  static func processPlanar(
+package enum AudioMeterDSP {
+  package static func processPlanar(
     _ channels: [[Float]],
     waveformSampleCount: Int,
     minimumDecibels: Float
@@ -29,7 +29,7 @@ enum AudioMeterDSP {
     }
   }
 
-  static func processInterleaved(
+  package static func processInterleaved(
     _ samples: [Float],
     channelCount: Int,
     waveformSampleCount: Int,
@@ -50,7 +50,7 @@ enum AudioMeterDSP {
     }
   }
 
-  static func writeMeasurement(
+  package static func writeMeasurement(
     samples: UnsafePointer<Float>?,
     frameCount: Int,
     sampleStride: Int,
@@ -162,10 +162,10 @@ enum AudioMeterDSP {
   }
 }
 
-struct RealtimeAudioMeterScalars: Sendable {
-  let rootMeanSquare: Float
-  let peak: Float
-  let decibels: Float
-  let isClipping: Bool
-  let waveformCount: Int
+package struct RealtimeAudioMeterScalars: Sendable {
+  package let rootMeanSquare: Float
+  package let peak: Float
+  package let decibels: Float
+  package let isClipping: Bool
+  package let waveformCount: Int
 }

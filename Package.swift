@@ -58,6 +58,7 @@ let package = Package(
       name: "RilliyaRealtime",
       dependencies: [
         "RilliyaAudioWorkgroup",
+        "RilliyaCore",
         .product(name: "Atomics", package: "swift-atomics"),
       ]
     ),

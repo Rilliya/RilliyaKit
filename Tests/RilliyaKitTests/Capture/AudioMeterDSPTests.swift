@@ -4,6 +4,7 @@ import RilliyaCore
 import Testing
 
 @testable import RilliyaCapture
+@testable import RilliyaRealtime
 
 @Suite("Audio meter DSP")
 struct AudioMeterDSPTests {
