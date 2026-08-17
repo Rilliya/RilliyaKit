@@ -484,7 +484,9 @@ struct NetworkAudioCodecSuiteTests {
       var produced = 0
       for block in 0..<24 {
         let byteCount = try harness.encodeBlock(block)
-        #expect(byteCount <= NetworkAudioCodec.maximumPacketByteCount)
+        #expect(
+          byteCount
+            <= codec.maximumPacketByteCount(sampleRate: 48_000, channelCount: 2))
         if byteCount > 0 { produced += 1 }
       }
       // A codec that fills first still has to produce most of what it was given.
@@ -494,33 +496,19 @@ struct NetworkAudioCodecSuiteTests {
 
   /// A block length is a floor under the delay of the whole path, so what each codec insists on
   /// is part of what choosing it means.
-  @Test("Every codec offered packs a block short enough for live audio")
+  @Test("The lossy codecs pack a block short enough for live audio, and the lossless one does not")
   func blockLengthsAreWhatTheyClaim() throws {
     for codec in Self.codecs {
       let frames = try #require(
         codec.frameCount(nearestTo: 10, sampleRate: 48_000, channelCount: 2))
       let milliseconds = Double(frames) / 48_000 * 1_000
-      #expect(milliseconds <= 25, "\(codec.encoding) packs \(milliseconds) ms per packet")
+      if codec.isLossless {
+        // Paying for every sample means waiting for a long block, which a caller has to know.
+        #expect(milliseconds > 25, "\(codec.encoding) packs \(milliseconds) ms per packet")
+      } else {
+        #expect(milliseconds <= 25, "\(codec.encoding) packs \(milliseconds) ms per packet")
+      }
     }
-  }
-
-  /// Apple Lossless is defined but not offered.
-  ///
-  /// One of its blocks is about twenty datagrams wide and losing any one of them loses the whole
-  /// block. This holds the measurement that decided it, so the decision is checked rather than
-  /// remembered.
-  @Test("A lossless block is far wider than a datagram, which is why it is not offered")
-  func losslessDoesNotFitADatagram() throws {
-    let codec = NetworkAudioCodec.appleLossless
-    #expect(!NetworkAudioCodec.all.contains(codec))
-
-    let frames = try #require(
-      codec.frameCount(nearestTo: 10, sampleRate: 48_000, channelCount: 2))
-    // Even at the ratio a lossless codec achieves, one block dwarfs what a datagram carries.
-    let uncompressedBytes = frames * 2 * MemoryLayout<Float>.stride
-    let plausibleCompressed = uncompressedBytes / 2
-    #expect(
-      plausibleCompressed > NetworkAudioSenderConfiguration.defaultMaximumDatagramByteCount * 5)
   }
 
   /// A codec that cannot read anything without the sender's configuration must say so rather
@@ -541,9 +529,13 @@ struct NetworkAudioCodecSuiteTests {
     }
   }
 
-  /// The point of a lossless codec is that it is lossless, which only a sample-for-sample
-  /// comparison shows.
-  @Test("The lossless codec returns every sample exactly")
+  /// What "lossless" is worth here, measured rather than claimed.
+  ///
+  /// The round trip is not bit-exact for 32-bit float: it returns every sample to about two to
+  /// the minus thirty-second, which is one step of a 32-bit integer. That is far below the least
+  /// significant bit of 24-bit audio, so nothing a converter or a recording carries is altered —
+  /// but it is not zero, and an earlier measurement that printed it as zero was rounding.
+  @Test("The lossless codec returns every sample below the smallest step real audio has")
   func losslessReturnsEverySampleExactly() throws {
     let codec = NetworkAudioCodec.appleLossless
     let frames = try #require(
@@ -570,7 +562,8 @@ struct NetworkAudioCodecSuiteTests {
     let input = UnsafeMutablePointer<Float>.allocate(capacity: sampleCount)
     let output = UnsafeMutablePointer<Float>.allocate(capacity: sampleCount)
     let packet = UnsafeMutableRawBufferPointer.allocate(
-      byteCount: NetworkAudioCodec.maximumPacketByteCount, alignment: 16)
+      byteCount: codec.maximumPacketByteCount(sampleRate: 48_000, channelCount: channelCount),
+      alignment: 16)
     defer {
       input.deallocate()
       output.deallocate()
@@ -604,7 +597,10 @@ struct NetworkAudioCodecSuiteTests {
       }
     }
 
-    #expect(worstError == 0)
+    // One step of 24-bit audio, which is finer than any source this carries.
+    let twentyFourBitStep = Float(1.0 / 8_388_608.0)
+    #expect(worstError < twentyFourBitStep)
+    #expect(worstError > 0, "a bit-exact result would mean the float path changed")
   }
 
   /// Opus cannot carry 44.1 kHz and the low-delay AAC profiles can, which is the whole reason to
@@ -665,7 +661,8 @@ struct NetworkAudioCodecSuiteTests {
       input.initialize(repeating: 0, count: sampleCount)
       output.initialize(repeating: 0, count: sampleCount)
       packet = .allocate(
-        byteCount: NetworkAudioCodec.maximumPacketByteCount, alignment: 16)
+        byteCount: codec.maximumPacketByteCount(sampleRate: sampleRate, channelCount: channelCount),
+        alignment: 16)
     }
 
     deinit {

@@ -341,6 +341,8 @@ final class NetworkAudioPacketIngestor {
   private var lastFrameCount = 0
   /// Built when the first compressed packet says which format and block length the sender chose.
   private var decoder: NetworkAudioCompressedDecoder?
+  private let reassembler: NetworkAudioFragmentReassembler
+  private var configurationBytes = Data()
   private var asker = NetworkAudioRetransmissionAsker()
   private var requestSequence: UInt64 = 0
   private var retransmissionRequestCount: UInt64 = 0
@@ -371,6 +373,10 @@ final class NetworkAudioPacketIngestor {
       depth: configuration.reorderDepth,
       maximumFrameCount: maximumFrameCount,
       channelCount: configuration.format.channelCount
+    )
+    reassembler = try NetworkAudioFragmentReassembler(
+      blockCount: 2,
+      maximumFragmentByteCount: configuration.maximumDatagramByteCount
     )
     interleavedStorage = .allocate(capacity: sampleCapacity)
     silenceStorage = .allocate(capacity: sampleCapacity)
@@ -422,7 +428,29 @@ final class NetworkAudioPacketIngestor {
       decodePayload(packet.payload)
       decodedFrameCount = packet.frameCount
     case .opus, .aacEnhancedLowDelay, .aacLowDelay, .appleLossless:
-      guard let frames = decodeCompressed(packet) else {
+      if !packet.codecConfiguration.isEmpty {
+        configurationBytes = packet.codecConfiguration
+      }
+      // A block wider than a datagram is not audio until every piece of it is present.
+      let block: Data
+      if let fragment = packet.fragment {
+        switch reassembler.admit(
+          sequence: packet.sequence, fragment: fragment, payload: packet.payload)
+        {
+        case .completed(let whole):
+          block = whole
+        case .held:
+          lastAcceptedTime = now
+          increment(\Self.acceptedPacketCount)
+          return .accepted(frameCount: 0)
+        case .tooLate, .duplicate:
+          increment(\Self.stalePacketCount)
+          return .stale
+        }
+      } else {
+        block = packet.payload
+      }
+      guard let frames = decodeCompressed(packet, block: block) else {
         increment(\Self.rejectedPacketCount)
         return .rejected
       }
@@ -505,7 +533,7 @@ final class NetworkAudioPacketIngestor {
   ///
   /// A codec that looks ahead yields fewer frames from the opening packets than they carry. What
   /// it yields is what is written.
-  private func decodeCompressed(_ packet: NetworkAudioPacket) -> Int? {
+  private func decodeCompressed(_ packet: NetworkAudioPacket, block: Data) -> Int? {
     if decoder?.codec.encoding != packet.encoding
       || decoder?.frameCountPerPacket != packet.frameCount
     {
@@ -514,12 +542,13 @@ final class NetworkAudioPacketIngestor {
           codec: $0,
           sampleRate: packet.format.sampleRate,
           channelCount: packet.format.channelCount,
-          frameCountPerPacket: packet.frameCount
+          frameCountPerPacket: packet.frameCount,
+          configuration: configurationBytes
         )
       }
     }
     guard let decoder, packet.frameCount <= maximumFrameCount else { return nil }
-    return try? packet.payload.withUnsafeBytes { bytes in
+    return try? block.withUnsafeBytes { bytes in
       try decoder.decode(packet: bytes, into: interleavedStorage)
     }
   }
@@ -527,6 +556,8 @@ final class NetworkAudioPacketIngestor {
   /// Drops the decoder along with everything else the previous session left behind.
   private func resetDecoder() {
     decoder = nil
+    configurationBytes = Data()
+    reassembler.reset()
     statisticsLock.withLock { asker.reset() }
   }
 
@@ -536,8 +567,11 @@ final class NetworkAudioPacketIngestor {
   /// trip measured so far leaves no time to place an answer.
   func retransmissionRequest(now: UInt64) -> NetworkAudioRetransmissionRequest? {
     guard configuration.requestsRetransmission, let sessionID = activeSessionID else { return nil }
-    let missing = reorderBuffer.missingSequences(
-      limit: NetworkAudioRetransmissionRequest.maximumSequenceCount)
+    let limit = NetworkAudioRetransmissionRequest.maximumSequenceCount
+    var missing = reassembler.missingSequences(limit: limit)
+    if missing.count < limit {
+      missing += reorderBuffer.missingSequences(limit: limit - missing.count)
+    }
     guard !missing.isEmpty else { return nil }
     let queuedFrames = frameBuffer.statistics().availableFrameCount
     let queued = Duration.nanoseconds(

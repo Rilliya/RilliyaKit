@@ -62,10 +62,9 @@ extension NetworkAudioCodecError: LocalizedError {
 /// the last suits listening rather than monitoring and is offered as a choice rather than a
 /// default.
 ///
-/// The system's lossless codecs are absent for two different reasons, both measured. FLAC does
-/// not return every sample exactly through this float path, so calling it lossless would be
-/// untrue. Apple Lossless does — but one of its blocks is about twenty datagrams wide, and
-/// losing any one of them loses the whole block.
+/// FLAC is absent although the system offers it. Measured by the round trip that shows Apple
+/// Lossless returning audio to within one step of a 32-bit integer, FLAC through this float path
+/// is out by half of full scale, so offering it as lossless would be untrue.
 public struct NetworkAudioCodec: Equatable, Hashable, Sendable {
   /// The value this codec writes into a datagram's encoding byte.
   public let encoding: NetworkAudioWireEncoding
@@ -83,11 +82,37 @@ public struct NetworkAudioCodec: Equatable, Hashable, Sendable {
   /// all, so that configuration has to cross the network too.
   public let needsConfiguration: Bool
 
-  /// Whether every sample comes back exactly as it was sent.
+  /// Whether the codec returns the audio rather than an approximation of it.
+  ///
+  /// Measured here, the round trip through 32-bit float is accurate to about two to the minus
+  /// thirty-second — one step of a 32-bit integer, and far below the least significant bit of
+  /// 24-bit audio. Nothing a converter or a recording carries is altered; it is not, strictly,
+  /// bit-exact for float.
   public let isLossless: Bool
 
-  /// The largest compressed packet any of these codecs is allowed to produce.
-  public static let maximumPacketByteCount = 4_000
+  /// The largest packet a lossy codec here is allowed to produce.
+  ///
+  /// A lossy codec spends a bit rate, so its packets are small whatever the block holds. A
+  /// lossless one spends whatever the audio needs, which is why it is bounded differently.
+  public static let maximumLossyPacketByteCount = 4_000
+
+  /// The largest packet any codec here produces, across every shape it carries.
+  ///
+  /// Storage is sized from this, so it has to cover the worst case rather than the usual one.
+  public static let maximumPacketByteCount =
+    NetworkAudioPacketFragment.maximumCount * maximumLossyPacketByteCount
+
+  /// The largest packet this codec produces for audio of this shape.
+  ///
+  /// Lossless audio that does not compress costs what it weighs, so the bound is the samples
+  /// themselves with room for the codec's own overhead.
+  public func maximumPacketByteCount(sampleRate: Double, channelCount: Int) -> Int {
+    guard isLossless else { return Self.maximumLossyPacketByteCount }
+    let frames =
+      frameCounts(sampleRate: sampleRate, channelCount: channelCount).max() ?? 0
+    let samples = frames * channelCount * MemoryLayout<Float>.stride
+    return min(samples + samples / 8 + 1_024, Self.maximumPacketByteCount)
+  }
 
   /// Opus, which packs the shortest blocks of anything here and carries loss well.
   public static let opus = NetworkAudioCodec(
@@ -134,10 +159,9 @@ public struct NetworkAudioCodec: Equatable, Hashable, Sendable {
   )
 
   /// Every compressed format this wire protocol carries.
-  ///
-  /// ``appleLossless`` is absent because one of its blocks does not fit in a datagram; see its
-  /// documentation.
-  public static let all: [NetworkAudioCodec] = [opus, aacEnhancedLowDelay, aacLowDelay]
+  public static let all: [NetworkAudioCodec] = [
+    opus, aacEnhancedLowDelay, aacLowDelay, appleLossless,
+  ]
 
   /// The largest configuration any of these codecs produces.
   ///
@@ -519,6 +543,7 @@ public final class NetworkAudioCompressedDecoder: @unchecked Sendable {
 
   private let converter: AudioConverterRef
   private let packetStorage: UnsafeMutableRawPointer
+  private let packetCapacity: Int
   private let source: PacketSource
 
   /// Prepares a decoder for one format and block length.
@@ -577,9 +602,12 @@ public final class NetworkAudioCompressedDecoder: @unchecked Sendable {
       }
     }
     packetStorage = .allocate(
-      byteCount: NetworkAudioCodec.maximumPacketByteCount,
+      byteCount: codec.maximumPacketByteCount(
+        sampleRate: sampleRate, channelCount: channelCount),
       alignment: 16
     )
+    packetCapacity = codec.maximumPacketByteCount(
+      sampleRate: sampleRate, channelCount: channelCount)
     source = PacketSource(storage: packetStorage)
   }
 
@@ -610,7 +638,7 @@ public final class NetworkAudioCompressedDecoder: @unchecked Sendable {
     guard let bytes = packet.baseAddress, packet.count > 0 else {
       throw NetworkAudioCodecError.failed(kAudioConverterErr_UnspecifiedError)
     }
-    guard packet.count <= NetworkAudioCodec.maximumPacketByteCount else {
+    guard packet.count <= packetCapacity else {
       throw NetworkAudioCodecError.oversizedPacket(packet.count)
     }
     packetStorage.copyMemory(from: bytes, byteCount: packet.count)

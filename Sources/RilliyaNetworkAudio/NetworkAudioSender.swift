@@ -173,11 +173,8 @@ public struct NetworkAudioSenderConfiguration: Equatable, Hashable, Sendable {
 
   /// The compressed bytes one packet may carry, which the datagram bound decides.
   var maximumCompressedPacketByteCount: Int {
-    min(
-      NetworkAudioCodec.maximumPacketByteCount,
-      maximumDatagramByteCount - NetworkAudioPacketCodec.headerByteCount
-        - (sharedKey == nil ? 0 : NetworkAudioSessionCipher.tagByteCount)
-    )
+    maximumDatagramByteCount - NetworkAudioPacketCodec.headerByteCount
+      - (sharedKey == nil ? 0 : NetworkAudioSessionCipher.tagByteCount)
   }
 
   var maximumFrameCountPerPacket: Int {
@@ -481,8 +478,8 @@ private final class NetworkAudioSenderPacketizer: @unchecked Sendable {
         frameCount: configuration.framesPerPacket
       ) + NetworkAudioSessionCipher.tagByteCount
     let compressed =
-      NetworkAudioPacketCodec.headerByteCount + configuration.maximumCompressedPacketByteCount
-      + NetworkAudioSessionCipher.tagByteCount
+      NetworkAudioPacketCodec.headerByteCount + NetworkAudioPacketFragment.headerByteCount
+      + configuration.maximumCompressedPacketByteCount + NetworkAudioSessionCipher.tagByteCount
     datagram = UnsafeMutableRawBufferPointer.allocate(
       byteCount: configuration.encoding == .interleavedFloat32
         ? uncompressed : max(uncompressed, compressed),
@@ -549,22 +546,23 @@ private final class NetworkAudioSenderPacketizer: @unchecked Sendable {
     }
     guard case .read(let readFrameCount, _) = read, readFrameCount == frameCount else { return }
 
+    if let compression {
+      // A compressed block need not fit one datagram, so this sends however many it takes.
+      try? compress(compression, frameCount: frameCount, through: connection)
+      return
+    }
     let written: Int
     do {
-      if let compression {
-        written = try compress(compression, frameCount: frameCount)
-      } else {
-        written = try readOnlyPointers.withUnsafeBufferPointer {
-          try NetworkAudioPacketCodec.encode(
-            sessionID: configuration.sessionID,
-            sequence: sequence,
-            format: configuration.format,
-            frameCount: frameCount,
-            planarChannels: $0,
-            into: datagram,
-            cipher: cipher
-          )
-        }
+      written = try readOnlyPointers.withUnsafeBufferPointer {
+        try NetworkAudioPacketCodec.encode(
+          sessionID: configuration.sessionID,
+          sequence: sequence,
+          format: configuration.format,
+          frameCount: frameCount,
+          planarChannels: $0,
+          into: datagram,
+          cipher: cipher
+        )
       }
     } catch {
       return
@@ -607,8 +605,15 @@ private final class NetworkAudioSenderPacketizer: @unchecked Sendable {
     try? NetworkAudioRetransmissionRequest.decode(data, cipher: cipher)
   }
 
-  /// Weaves the channels together, compresses them, and writes the datagram.
-  private func compress(_ compression: CompressionStaging, frameCount: Int) throws -> Int {
+  /// Weaves the channels together, compresses them, and sends however many datagrams it takes.
+  ///
+  /// A block wider than a datagram is split across consecutive sequences, so a receiver can put
+  /// it back and can ask for any piece that goes missing.
+  private func compress(
+    _ compression: CompressionStaging,
+    frameCount: Int,
+    through connection: NWConnection
+  ) throws {
     let channelCount = configuration.format.channelCount
     for frame in 0..<frameCount {
       for channel in 0..<channelCount {
@@ -619,16 +624,46 @@ private final class NetworkAudioSenderPacketizer: @unchecked Sendable {
       input: compression.interleaved, into: compression.packet)
     // A codec still filling produces no packet from this block, so there is nothing to send and
     // the sequence must not move on without one.
-    guard byteCount > 0 else { return 0 }
-    return try NetworkAudioPacketCodec.encode(
-      sessionID: configuration.sessionID,
-      sequence: sequence,
-      format: configuration.format,
-      frameCount: frameCount,
-      encoding: configuration.encoding,
-      payload: UnsafeRawBufferPointer(rebasing: compression.packet[..<byteCount]),
-      into: datagram,
-      cipher: cipher
-    )
+    guard byteCount > 0 else { return }
+
+    let configurationBytes = compression.encoder.configuration
+    let room =
+      configuration.maximumCompressedPacketByteCount
+      - NetworkAudioPacketFragment.headerByteCount - configurationBytes.count
+    guard room >= 1 else { throw NetworkAudioSenderError.invalidDatagramBound }
+    let pieceCount = (byteCount + room - 1) / room
+    guard pieceCount <= NetworkAudioPacketFragment.maximumCount else {
+      throw NetworkAudioSenderError.invalidDatagramBound
+    }
+
+    for index in 0..<pieceCount {
+      let start = index * room
+      let length = min(room, byteCount - start)
+      // The configuration rides the first piece, so a decoder has it before the block completes.
+      let written = try NetworkAudioPacketCodec.encode(
+        sessionID: configuration.sessionID,
+        sequence: sequence,
+        format: configuration.format,
+        frameCount: frameCount,
+        encoding: configuration.encoding,
+        payload: UnsafeRawBufferPointer(
+          rebasing: compression.packet[start..<(start + length)]),
+        codecConfiguration: index == 0 ? configurationBytes : Data(),
+        fragment: pieceCount > 1
+          ? try NetworkAudioPacketFragment(index: index, count: pieceCount) : nil,
+        into: datagram,
+        cipher: cipher
+      )
+      guard written > 0, let base = datagram.baseAddress else { return }
+      history?.record(
+        sequence: sequence,
+        datagram: UnsafeRawBufferPointer(start: base, count: written)
+      )
+      sequence &+= 1
+      connection.send(
+        content: Data(bytes: base, count: written),
+        completion: .idempotent
+      )
+    }
   }
 }

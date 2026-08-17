@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import Foundation
+import RilliyaRealtime
 import Testing
 
 @testable import RilliyaNetworkAudio
@@ -157,6 +158,167 @@ struct NetworkAudioFragmentReassemblerTests {
 
     func joined(_ block: [Data]) -> Data {
       block.reduce(into: Data()) { $0.append($1) }
+    }
+
+    func admit(
+      _ block: [Data],
+      index: Int,
+      of count: Int,
+      firstSequence: UInt64
+    ) throws -> NetworkAudioReassembly {
+      reassembler.admit(
+        sequence: firstSequence &+ UInt64(index),
+        fragment: try NetworkAudioPacketFragment(index: index, count: count),
+        payload: block[index]
+      )
+    }
+  }
+}
+
+/// A split block has to survive the whole path — encoder, wire, reassembler, decoder — or the
+/// pieces work and the audio still does not.
+@Suite("Network audio lossless over the wire")
+struct NetworkAudioLosslessWireTests {
+  private enum Fixture {
+    static let sampleRate = 48_000.0
+    static let channelCount = 2
+    static let sessionID = UUID(
+      uuid: (
+        0x5A, 0x4B, 0x3C, 0x2D, 0x1E, 0x0F, 0x4A, 0x9B,
+        0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11
+      )
+    )
+  }
+
+  /// Every block of a lossless stream reaches the queue, which means every piece of every block
+  /// arrived and was put back in the right order.
+  @Test("A lossless stream crosses the wire in pieces and reaches the queue")
+  func losslessStreamReachesTheQueue() throws {
+    let codec = NetworkAudioCodec.appleLossless
+    let frameCount = try #require(
+      codec.frameCount(nearestTo: 10, sampleRate: Fixture.sampleRate, channelCount: 2))
+    let format = try NetworkAudioStreamFormat(
+      sampleRate: Fixture.sampleRate, channelCount: Fixture.channelCount)
+    let frameBuffer = try AudioRealtimeFrameBuffer(
+      format: AudioProcessingFormat(
+        sampleRate: Fixture.sampleRate, channelCount: Fixture.channelCount),
+      capacityFrameCount: 65_536
+    )
+    let ingestor = try NetworkAudioPacketIngestor(
+      configuration: NetworkAudioReceiverConfiguration(
+        port: 49_998,
+        format: format,
+        capacityFrameCount: 65_536
+      ),
+      frameBuffer: frameBuffer
+    )
+    let encoder = try NetworkAudioCompressedEncoder(
+      codec: codec,
+      sampleRate: Fixture.sampleRate,
+      channelCount: Fixture.channelCount,
+      frameCountPerPacket: frameCount,
+      bitRate: 0
+    )
+    let sampleCount = frameCount * Fixture.channelCount
+    let samples = UnsafeMutablePointer<Float>.allocate(capacity: sampleCount)
+    let packet = UnsafeMutableRawBufferPointer.allocate(
+      byteCount: codec.maximumPacketByteCount(
+        sampleRate: Fixture.sampleRate, channelCount: Fixture.channelCount),
+      alignment: 16
+    )
+    var datagram = Data(count: NetworkAudioPacketCodec.maximumDatagramByteCount)
+    defer {
+      samples.deallocate()
+      packet.deallocate()
+    }
+
+    let room =
+      1_200 - NetworkAudioPacketCodec.headerByteCount
+      - NetworkAudioPacketFragment.headerByteCount
+      - NetworkAudioCodec.maximumConfigurationByteCount
+    var sequence: UInt64 = 0
+    var seed: UInt64 = 0xDEAD_BEEF_CAFE_1234
+    var blocksSent = 0
+    var pieceCounts: [Int] = []
+
+    for block in 0..<12 {
+      for frame in 0..<frameCount {
+        let position = Double(block * frameCount + frame)
+        seed = seed &* 6_364_136_223_846_793_005 &+ 1
+        let noise = Double(Int64(bitPattern: seed >> 11)) / Double(1 << 52) * 0.04
+        let value = Float(0.2 * sin(2 * .pi * 220 * position / Fixture.sampleRate) + noise)
+        for channel in 0..<Fixture.channelCount {
+          samples[frame * Fixture.channelCount + channel] = value
+        }
+      }
+      let byteCount = try encoder.encode(input: samples, into: packet)
+      guard byteCount > 0 else { continue }
+      blocksSent += 1
+
+      let pieceCount = (byteCount + room - 1) / room
+      pieceCounts.append(pieceCount)
+      for index in 0..<pieceCount {
+        let start = index * room
+        let length = min(room, byteCount - start)
+        let written = try datagram.withUnsafeMutableBytes { destination in
+          try NetworkAudioPacketCodec.encode(
+            sessionID: Fixture.sessionID,
+            sequence: sequence,
+            format: format,
+            frameCount: frameCount,
+            encoding: .appleLossless,
+            payload: UnsafeRawBufferPointer(rebasing: packet[start..<(start + length)]),
+            codecConfiguration: index == 0 ? encoder.configuration : Data(),
+            fragment: pieceCount > 1
+              ? try NetworkAudioPacketFragment(index: index, count: pieceCount) : nil,
+            into: destination
+          )
+        }
+        _ = ingestor.ingest(datagram.prefix(written), now: sequence * 1_000_000)
+        sequence &+= 1
+      }
+    }
+
+    // The measurement that made splitting necessary: a lossless block is many datagrams wide.
+    #expect(pieceCounts.allSatisfy { $0 > 5 })
+    let statistics = ingestor.statistics()
+    #expect(statistics.rejectedPacketCount == 0)
+    // Every block but the codec's first reaches the queue whole.
+    #expect(
+      statistics.frameBuffer.writtenFrameCount >= UInt64((blocksSent - 2) * frameCount)
+    )
+  }
+
+  /// Losing one piece loses the block it belonged to, and nothing else.
+  @Test("A block missing a piece is lost, and the stream carries on")
+  func aLostPieceLosesOnlyItsBlock() throws {
+    let harness = try Harness()
+    let block = harness.block(pieces: 4)
+
+    // The first block loses a piece; the second is whole.
+    for index in [0, 1, 3] { _ = try harness.admit(block, index: index, of: 4, firstSequence: 0) }
+    var completed = 0
+    for index in 0..<4 {
+      if case .completed = try harness.admit(block, index: index, of: 4, firstSequence: 4) {
+        completed += 1
+      }
+    }
+
+    #expect(completed == 1)
+  }
+
+  private final class Harness {
+    let reassembler: NetworkAudioFragmentReassembler
+
+    init() throws {
+      reassembler = try NetworkAudioFragmentReassembler(
+        blockCount: 2,
+        maximumFragmentByteCount: 64
+      )
+    }
+
+    func block(pieces: Int) -> [Data] {
+      (0..<pieces).map { index in Data((0..<64).map { UInt8((index * 7 + $0) % 251) }) }
     }
 
     func admit(
