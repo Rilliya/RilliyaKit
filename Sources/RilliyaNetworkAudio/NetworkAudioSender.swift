@@ -287,8 +287,9 @@ public enum NetworkAudioTransportFailure: Equatable, Hashable, Sendable {
 /// Streams bounded planar Float32 PCM to one direct UDP peer.
 ///
 /// A graph producer writes only to ``frameBuffer``. A background worker performs interleaving,
-/// packet allocation, name resolution, and network IO. When the consumer falls behind, new frames
-/// are dropped by the bounded buffer rather than blocking or growing memory on the render path.
+/// compression, sealing, packet allocation, name resolution, and network IO — none of which a
+/// render callback ever waits on. When the consumer falls behind, new frames are dropped by the
+/// bounded buffer rather than blocking or growing memory on the render path.
 public final class NetworkAudioSender: @unchecked Sendable {
   /// Receives the first asynchronous sender failure away from the render path.
   public typealias FailureHandler = @Sendable (NetworkAudioSenderError) -> Void

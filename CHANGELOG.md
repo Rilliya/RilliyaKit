@@ -10,23 +10,64 @@ version section with migration guidance.
 
 ### Added
 
-- Nothing yet.
+- `RilliyaDSP` converts between sample rates. `AudioSampleRateConverter` handles interleaved and
+  planar layouts and carries between blocks whatever a conversion did not consume, so a long
+  stream does not drift. `AudioSampleRateLadder` resolves a source rate to a supported one by
+  preferring an exact match, then the next rate above, and only coming down when a codec's
+  ceiling requires it.
+- `RilliyaNetworkAudio` carries compressed audio as well as float samples. `NetworkAudioCodec`
+  describes Opus, AAC Low Delay, AAC Enhanced Low Delay, and Apple Lossless, and reports what
+  each can carry by asking the system rather than by assertion, so a macOS release that adds or
+  removes an encoder changes the answer. Measured between two Macs at 48 kHz stereo: 3346 kbit/s
+  uncompressed against 213 for Opus, 484 for AAC ELD, and 2061 for Apple Lossless.
+- `NetworkAudioReceiver` places packets that arrive out of order instead of discarding them,
+  bounded by `reorderDepth`. At 30 % reordering this took a stream from 1403 stale packets and
+  1402 gaps down to 1 and 0.
+- `NetworkAudioReceiver` asks a sender for a packet the network dropped, bounded by a measured
+  round trip: it asks only while the answer could still arrive before that audio is due, asks
+  once per gap, and a sender answers within a quarter of the rate it is already sending at. At
+  2 % loss this took 220 gaps down to 5.
+- A codec block wider than one datagram is split across datagrams and put back together, which
+  is what lets Apple Lossless cross a 1500-byte network at all. Pieces are released in the order
+  they were sent.
+- `NetworkAudioFormatDiscovery` reports the sample rate and channel count of a stream already
+  arriving on a port, for a receiver that would otherwise have to be told. Measured 2.2 s to
+  identify a 44.1 kHz mono stream and 2.0 s for 96 kHz eight-channel.
+- `VirtualAudioEndpointStore` takes the bundle identifier of the driver it manages, so the type
+  is usable by a host other than the one it was written for.
 
 ### Changed
 
-- Nothing yet.
+- The reserved word in the packet header now carries the length of a codec's configuration, and
+  a codec that needs one sends it behind the payload and inside the seal. The header remains 48
+  bytes.
 
 ### Fixed
 
-- Nothing yet.
+- `AudioSampleRateConverter` no longer re-offers the start of its input to the converter, which
+  had left a converted stream measurably off pitch — 35 to 43 Hz on a 440 Hz tone.
 
 ### Security
 
-- Nothing yet.
+- Sealing takes a nonce domain, so a request and a packet at the same sequence no longer produce
+  the same nonce under one key. Reusing an AES-GCM nonce is the single failure the construction
+  does not survive.
+- `NetworkAudioPacketReorderBuffer.advance(to:)` is bounded by its window. A packet naming a far
+  future sequence previously made it walk every sequence in between, which one datagram could
+  use to occupy a receiver.
+- `NetworkAudioFormatDiscovery` refuses port 0. `NWEndpoint.Port` accepts it as "any port", which
+  would have bound a listener somewhere other than where the caller asked.
+- A sender acts on a retransmission request only when the request is sealed under the session
+  key, so an unkeyed request cannot make a keyed sender send.
+- Removed every `try!` and force unwrap this package's own lint rules forbid, so malformed input
+  reaches an error rather than a trap.
 
 ### Breaking Changes
 
-- Nothing yet.
+- `NetworkAudioSessionCipher.seal` and `open` take a nonce domain. A caller that sealed anything
+  itself must pass `.audio`.
+- The packet header's reserved word is no longer reserved. A sender and receiver from different
+  builds do not interoperate; both sides must be updated together.
 
 ## 0.1.0-prealpha.1
 

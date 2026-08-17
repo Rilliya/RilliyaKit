@@ -71,10 +71,10 @@ files still import the modules that define the APIs they use.
 | `RilliyaRealtime` | Prepared render contracts and a bounded realtime PCM frame buffer | Swift Atomics |
 | `RilliyaDiscovery` | Public Core Audio process and device catalog discovery | `RilliyaCore` |
 | `RilliyaCapture` | Process-output, output-device mix, and input-device capture with bounded meters | `RilliyaCore`, `RilliyaRealtime` |
-| `RilliyaDSP` | Prepared gain, mixing, delay, noise gate, and signal generation | `RilliyaRealtime`, Swift Atomics |
+| `RilliyaDSP` | Prepared gain, mixing, delay, noise gate, sample rate conversion, and signal generation | `RilliyaRealtime`, Swift Atomics |
 | `RilliyaFilePlayback` | Bounded background decoding of Core Audio-supported local files into realtime PCM | `RilliyaRealtime` |
 | `RilliyaFileWriting` | Bounded background encoding and file output using installed public Core Audio encoders | `RilliyaRealtime` |
-| `RilliyaNetworkAudio` | Versioned direct-UDP PCM sending and receiving for trusted local networks | `RilliyaRealtime` |
+| `RilliyaNetworkAudio` | Versioned direct-UDP audio sending and receiving over a local network, optionally sealed and optionally compressed | `RilliyaRealtime` |
 | `RilliyaPlayback` | Prepared-source playback to a Core Audio output device | `RilliyaCore`, `RilliyaRealtime` |
 | `RilliyaVirtualAudio` | Stable, validated models for globally managed virtual audio endpoints | None |
 | `RilliyaGraph` | UI-independent typed graph construction and validation | None |
@@ -322,10 +322,10 @@ The default collision policy preserves earlier recordings by selecting an unused
 numeric suffix. Replacing a file requires an explicit configuration choice so a
 host can place user confirmation at the UI boundary.
 
-`RilliyaNetworkAudio` provides a focused direct-UDP transport for trusted local
-networks. A sender and receiver agree on one explicit sample rate and channel count;
-the versioned packet header carries a session ID and monotonic sequence, and both
-sides use fixed-capacity PCM queues. Network IO, packet allocation, validation, and
+`RilliyaNetworkAudio` provides a focused direct-UDP transport for a local network.
+A sender and receiver agree on one explicit sample rate and channel count; the
+versioned packet header carries a session ID and monotonic sequence, and both sides
+use fixed-capacity PCM queues. Network IO, packet allocation, validation, and
 interleaving remain away from the graph render path.
 
 ```swift
@@ -340,10 +340,26 @@ try receiver.start()
 // Connect receiver.frameBuffer to one prepared graph consumer.
 ```
 
-This first transport is intentionally not RTMP and does not provide encryption,
-authentication, retransmission, internet congestion control, or codec compression.
-Use it only on a trusted LAN. Streaming-service protocols and secure remote-network
-transports belong in separate modules so clients do not pay for them accidentally.
+Four things are optional and off unless configured, so a client pays for only what
+it asks for:
+
+| Option | What it does | Cost when enabled |
+| --- | --- | --- |
+| `sharedKey` | Seals every packet with AES-GCM under a per-session key derived by HKDF-SHA256, which also authenticates the header and rejects replays | 16 bytes per packet |
+| `encoding` | Carries the audio as Opus, AAC-LD, AAC-ELD, or Apple Lossless instead of float samples | 48 kHz stereo measured between two Macs: 3346 kbit/s uncompressed, 213 Opus, 484 AAC-ELD, 2061 lossless |
+| `reorderDepth` | Holds packets briefly so ones that arrive out of order are still placed | The depth's worth of added latency |
+| `requestsRetransmission` | Asks the sender again for a gap, but only while the answer could still arrive before its audio is due | A request datagram per gap, bounded to a quarter of the send rate |
+
+Without a `sharedKey` the audio crosses the network in the clear and anything can
+inject packets into the session; set one for any network you do not control.
+
+`NetworkAudioFormatDiscovery` reports the sample rate and channel count of a stream
+already arriving on a port, for a receiver that would otherwise have to be told.
+
+This transport is intentionally not RTMP and does not provide internet congestion
+control or traversal of anything but a local network. Streaming-service protocols
+and remote-network transports belong in separate modules so clients do not pay for
+them accidentally.
 
 ## Custom realtime sources and processors
 

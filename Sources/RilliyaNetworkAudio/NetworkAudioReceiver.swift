@@ -164,11 +164,13 @@ public struct NetworkAudioReceiverStatistics: Equatable, Sendable {
   public let frameBuffer: AudioRealtimeFrameBufferStatistics
 }
 
-/// Receives one versioned direct UDP PCM session into a bounded realtime buffer.
+/// Receives one versioned direct UDP audio session into a bounded realtime buffer.
 ///
-/// UDP provides no confidentiality, peer authentication, retransmission, or congestion control.
-/// This transport is intended for a trusted local network. Every datagram is length- and
-/// format-validated before its samples reach ``frameBuffer``; malformed traffic is discarded.
+/// Every datagram is length- and format-validated before its samples reach ``frameBuffer``, and
+/// malformed traffic is discarded. Confidentiality and peer authentication come from
+/// ``NetworkAudioReceiverConfiguration/sharedKey`` and are absent without one: UDP itself offers
+/// neither, so an unkeyed session can be read and written by anything that can reach the port.
+/// Congestion control this does not provide at all, which is what confines it to a local network.
 public final class NetworkAudioReceiver: @unchecked Sendable {
   /// Receives an asynchronous listener failure away from a render callback.
   public typealias FailureHandler = @Sendable (NetworkAudioReceiverError) -> Void
