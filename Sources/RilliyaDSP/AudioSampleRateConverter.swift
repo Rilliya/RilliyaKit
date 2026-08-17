@@ -70,12 +70,28 @@ public final class AudioSampleRateConverter: @unchecked Sendable {
   /// A caller feeding a queue needs this much on hand to be sure a block can be produced.
   public var maximumInputFrameCount: Int { inputCapacityFrameCount }
 
+  /// The frames still held from earlier blocks, waiting to be turned into output.
+  public var carriedInputFrameCount: Int { carriedFrameCount }
+
+  /// The new input frames to supply for the next block of `outputFrameCount` frames.
+  ///
+  /// The system decides for itself how much of what it is given to consume, so what is left over
+  /// is kept and this asks only for the difference. After the first block that settles at about
+  /// the ratio between the two rates.
+  public func inputFrameCountNeeded(forOutputFrameCount outputFrameCount: Int) -> Int {
+    let ratio = inputSampleRate / outputSampleRate
+    let required =
+      Int((Double(outputFrameCount) * ratio).rounded(.up)) + Self.filterHeadroomFrameCount
+    return max(0, min(required, inputCapacityFrameCount) - carriedFrameCount)
+  }
+
   private let converter: AudioConverterRef
   private let inputCapacityFrameCount: Int
   private let inputStorage: UnsafeMutablePointer<Float>
   private let source: Source
   private let destinationList: UnsafeMutablePointer<AudioBufferList>
   private let destinationListByteCount: Int
+  private var carriedFrameCount = 0
 
   /// Prepares a converter between two rates for one channel count and block size.
   public init(
@@ -151,9 +167,11 @@ public final class AudioSampleRateConverter: @unchecked Sendable {
     UnsafeMutableRawPointer(destinationList).deallocate()
   }
 
-  /// Forgets what the filter has seen, so the next block starts a new stream.
+  /// Forgets what the filter has seen and what it was still holding, so the next block starts a
+  /// new stream.
   public func reset() {
     AudioConverterReset(converter)
+    carriedFrameCount = 0
   }
 
   /// Produces `outputFrameCount` frames at the output rate from interleaved input.
@@ -179,11 +197,13 @@ public final class AudioSampleRateConverter: @unchecked Sendable {
     guard inputFrameCount >= 0 else {
       throw AudioSampleRateConverterError.invalidFrameCount(inputFrameCount)
     }
-    let available = min(inputFrameCount, inputCapacityFrameCount)
-    if available > 0 {
-      inputStorage.update(from: input, count: available * channelCount)
+    let taken = min(inputFrameCount, inputCapacityFrameCount - carriedFrameCount)
+    if taken > 0 {
+      inputStorage.advanced(by: carriedFrameCount * channelCount)
+        .update(from: input, count: taken * channelCount)
     }
-    source.availableFrameCount = available
+    source.availableFrameCount = carriedFrameCount + taken
+    source.consumedFrameCount = 0
 
     var list = AudioBufferList(
       mNumberBuffers: 1,
@@ -207,6 +227,7 @@ public final class AudioSampleRateConverter: @unchecked Sendable {
     guard status == noErr else {
       throw AudioSampleRateConverterError.conversionFailed(status)
     }
+    compactCarry()
     return Int(frames)
   }
 
@@ -239,12 +260,13 @@ public final class AudioSampleRateConverter: @unchecked Sendable {
       throw AudioSampleRateConverterError.invalidChannelCount(min(input.count, output.count))
     }
 
-    let available = min(inputFrameCount, inputCapacityFrameCount)
-    for channel in 0..<channelCount where available > 0 {
-      inputStorage.advanced(by: channel * inputCapacityFrameCount)
-        .update(from: input[channel], count: available)
+    let taken = min(inputFrameCount, inputCapacityFrameCount - carriedFrameCount)
+    for channel in 0..<channelCount where taken > 0 {
+      inputStorage.advanced(by: channel * inputCapacityFrameCount + carriedFrameCount)
+        .update(from: input[channel], count: taken)
     }
-    source.availableFrameCount = available
+    source.availableFrameCount = carriedFrameCount + taken
+    source.consumedFrameCount = 0
 
     let listBytes = destinationListByteCount
     let listStorage = UnsafeMutableRawPointer(destinationList)
@@ -273,7 +295,29 @@ public final class AudioSampleRateConverter: @unchecked Sendable {
     guard status == noErr else {
       throw AudioSampleRateConverterError.conversionFailed(status)
     }
+    compactCarry()
     return Int(frames)
+  }
+
+  /// Moves what the system did not consume back to the front, ready for the next block.
+  private func compactCarry() {
+    let remaining = source.availableFrameCount
+    let consumed = source.consumedFrameCount
+    if remaining > 0, consumed > 0 {
+      switch layout {
+      case .interleaved:
+        inputStorage.update(
+          from: inputStorage.advanced(by: consumed * channelCount),
+          count: remaining * channelCount
+        )
+      case .planar:
+        for channel in 0..<channelCount {
+          let base = inputStorage.advanced(by: channel * inputCapacityFrameCount)
+          base.update(from: base.advanced(by: consumed), count: remaining)
+        }
+      }
+    }
+    carriedFrameCount = remaining
   }
 
   /// Frames of slack beyond the ratio, covering the longest filter the converter may use.
@@ -311,12 +355,18 @@ public final class AudioSampleRateConverter: @unchecked Sendable {
     }
     let source = Unmanaged<Source>.fromOpaque(userData).takeUnretainedValue()
     let frames = min(Int(packetCount.pointee), source.availableFrameCount)
+    // The system may ask more than once for one block, so the carry is read from where the last
+    // ask left off rather than from its start.
+    let offset = source.consumedFrameCount
+    source.consumedFrameCount += frames
     source.availableFrameCount -= frames
     switch source.layout {
     case .interleaved:
       bufferList.pointee.mNumberBuffers = 1
       bufferList.pointee.mBuffers.mNumberChannels = UInt32(source.channelCount)
-      bufferList.pointee.mBuffers.mData = UnsafeMutableRawPointer(source.storage)
+      bufferList.pointee.mBuffers.mData = UnsafeMutableRawPointer(
+        source.storage.advanced(by: offset * source.channelCount)
+      )
       bufferList.pointee.mBuffers.mDataByteSize = UInt32(
         frames * source.channelCount * MemoryLayout<Float>.stride
       )
@@ -326,7 +376,7 @@ public final class AudioSampleRateConverter: @unchecked Sendable {
       for channel in 0..<source.channelCount {
         buffers[channel].mNumberChannels = 1
         buffers[channel].mData = UnsafeMutableRawPointer(
-          source.storage.advanced(by: channel * source.strideFrameCount)
+          source.storage.advanced(by: channel * source.strideFrameCount + offset)
         )
         buffers[channel].mDataByteSize = UInt32(frames * MemoryLayout<Float>.stride)
       }
@@ -343,7 +393,10 @@ public final class AudioSampleRateConverter: @unchecked Sendable {
     let layout: AudioSampleLayout
     /// Frames between one planar channel and the next inside ``storage``.
     let strideFrameCount: Int
+    /// Frames still to be offered.
     var availableFrameCount = 0
+    /// Frames already offered during the current block.
+    var consumedFrameCount = 0
 
     init(
       storage: UnsafeMutablePointer<Float>,

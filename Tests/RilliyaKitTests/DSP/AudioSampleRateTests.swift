@@ -406,3 +406,155 @@ struct AudioSampleRatePlanarConverterTests {
     }
   }
 }
+
+/// A converter used block after block is where drift shows up: the system decides for itself how
+/// much of each block it consumes, so anything the caller assumes about that accumulates.
+@Suite("Audio sample rate converter, streaming")
+struct AudioSampleRateStreamingTests {
+  private enum Fixture {
+    static let channelCount = 1
+    static let outputFrameCount = 512
+    static let blocks = 200
+    static let inputRate = 44_100.0
+    static let outputRate = 48_000.0
+    static let frequency = 440.0
+  }
+
+  @Test("A tone stays continuous across two hundred blocks")
+  func streamStaysContinuous() throws {
+    let harness = try Harness()
+
+    let rendered = try harness.stream(blocks: Fixture.blocks)
+
+    #expect(rendered.count == Fixture.blocks * Fixture.outputFrameCount)
+    // A splice or a repeated run shows up as a step no sine wave of this frequency can make.
+    let stepLimit = harness.largestNeighbourStep(harness.reference())
+    let settled = Array(rendered.dropFirst(Fixture.outputFrameCount))
+    #expect(harness.largestNeighbourStep(settled) < stepLimit * 1.5)
+  }
+
+  /// The output must advance at exactly the ratio, or the stream slowly leads or lags the source.
+  @Test("The frequency is held for the whole stream, not just the first block")
+  func frequencyDoesNotDrift() throws {
+    let harness = try Harness()
+
+    let rendered = try harness.stream(blocks: Fixture.blocks)
+    let settled = Array(rendered.dropFirst(Fixture.outputFrameCount))
+    let firstHalf = Array(settled.prefix(settled.count / 2))
+    let secondHalf = Array(settled.suffix(settled.count / 2))
+
+    let start = harness.dominantFrequency(firstHalf, sampleRate: Fixture.outputRate)
+    let end = harness.dominantFrequency(secondHalf, sampleRate: Fixture.outputRate)
+    #expect(abs(start - Fixture.frequency) < 2)
+    #expect(abs(end - Fixture.frequency) < 2)
+  }
+
+  /// What the converter asks for has to settle at the ratio, or a caller reading that many frames
+  /// from a queue would drain it faster or slower than it fills.
+  @Test("The input it asks for settles at the ratio between the rates")
+  func requestSettlesAtTheRatio() throws {
+    let harness = try Harness()
+
+    _ = try harness.stream(blocks: 20)
+    let asked = harness.converter.inputFrameCountNeeded(
+      forOutputFrameCount: Fixture.outputFrameCount)
+
+    let ratio = Fixture.inputRate / Fixture.outputRate
+    let expected = Double(Fixture.outputFrameCount) * ratio
+    #expect(Double(asked) > expected - 4)
+    #expect(Double(asked) < expected + 4)
+  }
+
+  @Test("Resetting drops what was held so a new stream does not inherit it")
+  func resetDropsTheCarry() throws {
+    let harness = try Harness()
+
+    _ = try harness.stream(blocks: 5)
+    #expect(harness.converter.carriedInputFrameCount > 0)
+
+    harness.converter.reset()
+
+    #expect(harness.converter.carriedInputFrameCount == 0)
+  }
+
+  private final class Harness {
+    let converter: AudioSampleRateConverter
+    private let input: UnsafeMutablePointer<Float>
+    private let output: UnsafeMutablePointer<Float>
+    private var sourceFrame = 0
+
+    init() throws {
+      converter = try AudioSampleRateConverter(
+        inputSampleRate: Fixture.inputRate,
+        outputSampleRate: Fixture.outputRate,
+        channelCount: Fixture.channelCount,
+        maximumOutputFrameCount: Fixture.outputFrameCount
+      )
+      input = .allocate(capacity: converter.maximumInputFrameCount)
+      output = .allocate(capacity: Fixture.outputFrameCount)
+      input.initialize(repeating: 0, count: converter.maximumInputFrameCount)
+      output.initialize(repeating: 0, count: Fixture.outputFrameCount)
+    }
+
+    deinit {
+      input.deallocate()
+      output.deallocate()
+    }
+
+    /// Feeds exactly what the converter asks for, block after block, as a graph would.
+    func stream(blocks: Int) throws -> [Float] {
+      var rendered: [Float] = []
+      for _ in 0..<blocks {
+        let needed = converter.inputFrameCountNeeded(
+          forOutputFrameCount: Fixture.outputFrameCount)
+        for index in 0..<needed {
+          input[index] = sample(at: sourceFrame + index)
+        }
+        sourceFrame += needed
+        let produced = try converter.convert(
+          input: input,
+          inputFrameCount: needed,
+          output: output,
+          outputFrameCount: Fixture.outputFrameCount
+        )
+        rendered.append(contentsOf: UnsafeBufferPointer(start: output, count: produced))
+      }
+      return rendered
+    }
+
+    private func sample(at frame: Int) -> Float {
+      Float(0.3 * sin(2 * .pi * Fixture.frequency * Double(frame) / Fixture.inputRate))
+    }
+
+    /// The same tone rendered directly at the output rate, as the yardstick.
+    func reference() -> [Float] {
+      (0..<(Fixture.outputFrameCount * 4)).map { frame in
+        Float(0.3 * sin(2 * .pi * Fixture.frequency * Double(frame) / Fixture.outputRate))
+      }
+    }
+
+    func largestNeighbourStep(_ samples: [Float]) -> Float {
+      guard samples.count > 1 else { return 0 }
+      var largest: Float = 0
+      for index in 1..<samples.count {
+        largest = max(largest, abs(samples[index] - samples[index - 1]))
+      }
+      return largest
+    }
+
+    func dominantFrequency(_ samples: [Float], sampleRate: Double) -> Double {
+      var crossings: [Double] = []
+      for index in 1..<samples.count where samples[index - 1] < 0 && samples[index] >= 0 {
+        let previous = Double(samples[index - 1])
+        let current = Double(samples[index])
+        let fraction = current == previous ? 0 : -previous / (current - previous)
+        crossings.append(Double(index - 1) + fraction)
+      }
+      guard crossings.count > 1, let first = crossings.first, let last = crossings.last else {
+        return 0
+      }
+      let period = (last - first) / Double(crossings.count - 1)
+      return period > 0 ? sampleRate / period : 0
+    }
+  }
+}
