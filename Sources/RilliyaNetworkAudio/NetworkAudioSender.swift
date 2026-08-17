@@ -34,9 +34,6 @@ public struct NetworkAudioSenderConfiguration: Equatable, Hashable, Sendable {
   /// The PCM format emitted by the sender.
   public let format: NetworkAudioStreamFormat
 
-  /// The sender session represented in every datagram.
-  public let sessionID: UUID
-
   /// The fixed producer-to-network queue capacity.
   public let capacityFrameCount: Int
 
@@ -69,7 +66,6 @@ public struct NetworkAudioSenderConfiguration: Equatable, Hashable, Sendable {
     host: String,
     port: UInt16,
     format: NetworkAudioStreamFormat,
-    sessionID: UUID = UUID(),
     capacityFrameCount: Int = 16_384,
     maximumDatagramByteCount: Int = defaultMaximumDatagramByteCount,
     framesPerPacket: Int? = nil,
@@ -100,7 +96,6 @@ public struct NetworkAudioSenderConfiguration: Equatable, Hashable, Sendable {
     self.host = normalizedHost
     self.port = port
     self.format = format
-    self.sessionID = sessionID
     self.capacityFrameCount = capacityFrameCount
     self.maximumDatagramByteCount = maximumDatagramByteCount
     guard (0...Self.maximumRetransmissionDepth).contains(retransmissionDepth) else {
@@ -300,6 +295,12 @@ public final class NetworkAudioSender: @unchecked Sendable {
   /// The single-producer queue written by a prepared graph.
   public let frameBuffer: AudioRealtimeFrameBuffer
 
+  /// The identity the current run stamps its packets with, or `nil` before the first start.
+  ///
+  /// A receiver reads this from the wire, so nothing needs to be told it. It is here for a caller
+  /// that wants to log or display which run a stream belongs to.
+  public var activeSessionID: UUID? { lock.withLock { sessionID } }
+
   private enum State {
     case ready
     case running
@@ -311,6 +312,7 @@ public final class NetworkAudioSender: @unchecked Sendable {
   private var state = State.ready
   private var connection: NWConnection?
   private var worker: AudioRealtimeWorker?
+  private var sessionID: UUID?
 
   /// Allocates the fixed PCM queue without opening a network connection.
   public init(
@@ -364,8 +366,13 @@ public final class NetworkAudioSender: @unchecked Sendable {
     connection.start(queue: queue)
     self.connection = connection
 
+    // A fresh identity per run, because the sequence a nonce is built from restarts at zero: a run
+    // that carried the previous identity would seal new audio under a nonce already spent.
+    let runSessionID = UUID()
+    sessionID = runSessionID
     let packets = NetworkAudioSenderPacketizer(
       configuration: configuration,
+      sessionID: runSessionID,
       frameBuffer: frameBuffer
     )
     let worker = AudioRealtimeWorker(
@@ -406,7 +413,7 @@ public final class NetworkAudioSender: @unchecked Sendable {
     connection.receiveMessage { [weak connection] content, _, _, error in
       guard let connection else { return }
       if let content, let request = packets.decodeRequest(content) {
-        packets.answer(request, through: connection)
+        packets.accept(request)
       }
       guard error == nil else { return }
       receiveRequest(on: connection, answeredBy: packets)
@@ -439,10 +446,22 @@ private final class NetworkAudioSenderPacketizer: @unchecked Sendable {
   static let computationBudget = Duration.microseconds(700)
 
   private let configuration: NetworkAudioSenderConfiguration
+  /// The identity this run seals and stamps its packets with.
+  ///
+  /// Minted per run rather than held in the configuration: the sequence a nonce is built from
+  /// restarts at zero here, so a run that reused an earlier identity would derive the earlier key
+  /// and seal different audio under a nonce already spent.
+  private let sessionID: UUID
   private let frameBuffer: AudioRealtimeFrameBuffer
   private let channelStorage: [UnsafeMutablePointer<Float>]
   private let readOnlyPointers: [UnsafePointer<Float>]
   private let datagram: UnsafeMutableRawBufferPointer
+  /// Where a resent datagram is staged, separate from ``datagram`` so answering a request cannot
+  /// land inside a packet still being encoded.
+  private let resendDatagram: UnsafeMutableRawBufferPointer
+  /// Where the sequences of one waiting request are read into.
+  private let wanted: UnsafeMutablePointer<UInt64>
+  private let mailbox = NetworkAudioRetransmissionMailbox()
   private let cipher: NetworkAudioSessionCipher?
   private let compression: CompressionStaging?
   private let history: NetworkAudioSenderHistory?
@@ -459,12 +478,14 @@ private final class NetworkAudioSenderPacketizer: @unchecked Sendable {
 
   init(
     configuration: NetworkAudioSenderConfiguration,
+    sessionID: UUID,
     frameBuffer: AudioRealtimeFrameBuffer
   ) {
     self.configuration = configuration
+    self.sessionID = sessionID
     self.frameBuffer = frameBuffer
     cipher = configuration.sharedKey.map {
-      NetworkAudioSessionCipher(sharedKey: $0, sessionID: configuration.sessionID)
+      NetworkAudioSessionCipher(sharedKey: $0, sessionID: sessionID)
     }
     let storage = (0..<configuration.format.channelCount).map { _ in
       UnsafeMutablePointer<Float>.allocate(capacity: configuration.framesPerPacket)
@@ -487,6 +508,13 @@ private final class NetworkAudioSenderPacketizer: @unchecked Sendable {
       alignment: MemoryLayout<UInt64>.alignment
     )
     compression = Self.staging(for: configuration)
+    // Its own buffer, so answering a request cannot overwrite a packet being encoded.
+    resendDatagram = UnsafeMutableRawBufferPointer.allocate(
+      byteCount: configuration.maximumDatagramByteCount,
+      alignment: MemoryLayout<UInt64>.alignment
+    )
+    wanted = .allocate(capacity: NetworkAudioRetransmissionMailbox.strideCount)
+    wanted.initialize(repeating: 0, count: NetworkAudioRetransmissionMailbox.strideCount)
     history =
       configuration.retransmissionDepth > 0
       ? NetworkAudioSenderHistory(
@@ -501,6 +529,9 @@ private final class NetworkAudioSenderPacketizer: @unchecked Sendable {
   deinit {
     for pointer in channelStorage { pointer.deallocate() }
     datagram.deallocate()
+    resendDatagram.deallocate()
+    wanted.deinitialize(count: NetworkAudioRetransmissionMailbox.strideCount)
+    wanted.deallocate()
     guard let compression else { return }
     compression.interleaved.deinitialize(count: compression.interleavedSampleCount)
     compression.interleaved.deallocate()
@@ -545,6 +576,9 @@ private final class NetworkAudioSenderPacketizer: @unchecked Sendable {
 
   /// Emits one packet when the queue holds a full one, and nothing otherwise.
   func emit(through connection: NWConnection) {
+    // Ahead of the guards below, so a starved buffer still answers what was asked for.
+    answerWaitingRequests(through: connection)
+
     let frameCount = configuration.framesPerPacket
     guard frameBuffer.statistics().availableFrameCount >= frameCount else { return }
     let read = channelStorage.withUnsafeBufferPointer {
@@ -561,7 +595,7 @@ private final class NetworkAudioSenderPacketizer: @unchecked Sendable {
     do {
       written = try readOnlyPointers.withUnsafeBufferPointer {
         try NetworkAudioPacketCodec.encode(
-          sessionID: configuration.sessionID,
+          sessionID: sessionID,
           sequence: sequence,
           format: configuration.format,
           frameCount: frameCount,
@@ -585,22 +619,34 @@ private final class NetworkAudioSenderPacketizer: @unchecked Sendable {
     )
   }
 
-  /// Sends again whatever a request names and this sender still holds.
+  /// Accepts a request for the realtime thread to answer on its next cycle.
   ///
-  /// A request naming another session asks for audio that no longer exists, and the budget is
-  /// what keeps a stream of requests from turning retransmission into the larger half of the flow.
-  func answer(_ request: NetworkAudioRetransmissionRequest, through connection: NWConnection) {
-    guard let history, request.sessionID == configuration.sessionID else { return }
+  /// Called from the network queue. A request naming another session asks for audio that no longer
+  /// exists, so it is dropped here rather than crossing.
+  func accept(_ request: NetworkAudioRetransmissionRequest) {
+    guard history != nil, request.sessionID == sessionID else { return }
+    mailbox.deposit(request.sequences)
+  }
+
+  /// Sends again whatever the waiting requests name and this sender still holds.
+  ///
+  /// Runs on the realtime thread, which is what owns the history and the buffer this reads and
+  /// writes. The budget is what keeps a stream of requests from turning retransmission into the
+  /// larger half of the flow, and the history answers any one sequence once.
+  private func answerWaitingRequests(through connection: NWConnection) {
+    guard let history else { return }
     let now = DispatchTime.now().uptimeNanoseconds
-    for wanted in request.sequences {
-      guard budget.allows(now: now) else { return }
-      guard let length = history.datagram(for: wanted, into: datagram),
-        let base = datagram.baseAddress
-      else { continue }
-      connection.send(
-        content: Data(bytes: base, count: length),
-        completion: .idempotent
-      )
+    while let count = mailbox.take(into: wanted) {
+      for offset in 0..<count {
+        guard budget.allows(now: now) else { return }
+        guard let length = history.takeDatagram(for: wanted[offset], into: resendDatagram),
+          let base = resendDatagram.baseAddress
+        else { continue }
+        connection.send(
+          content: Data(bytes: base, count: length),
+          completion: .idempotent
+        )
+      }
     }
   }
 
@@ -647,7 +693,7 @@ private final class NetworkAudioSenderPacketizer: @unchecked Sendable {
       let length = min(room, byteCount - start)
       // The configuration rides the first piece, so a decoder has it before the block completes.
       let written = try NetworkAudioPacketCodec.encode(
-        sessionID: configuration.sessionID,
+        sessionID: sessionID,
         sequence: sequence,
         format: configuration.format,
         frameCount: frameCount,

@@ -242,7 +242,7 @@ struct NetworkAudioSenderHistoryTests {
 
     var destination = [UInt8](repeating: 0, count: 64)
     let length = destination.withUnsafeMutableBytes {
-      history.datagram(for: 5, into: $0)
+      history.takeDatagram(for: 5, into: $0)
     }
 
     #expect(length == 32)
@@ -262,9 +262,9 @@ struct NetworkAudioSenderHistoryTests {
     var destination = [UInt8](repeating: 0, count: 64)
     let lengths = destination.withUnsafeMutableBytes { bytes in
       [
-        history.datagram(for: 0, into: bytes),
-        history.datagram(for: 3, into: bytes),
-        history.datagram(for: 7, into: bytes),
+        history.takeDatagram(for: 0, into: bytes),
+        history.takeDatagram(for: 3, into: bytes),
+        history.takeDatagram(for: 7, into: bytes),
       ]
     }
 
@@ -278,7 +278,7 @@ struct NetworkAudioSenderHistoryTests {
     let history = NetworkAudioSenderHistory(depth: 4, maximumDatagramByteCount: 64)
     var destination = [UInt8](repeating: 0, count: 64)
 
-    let found = destination.withUnsafeMutableBytes { history.datagram(for: 99, into: $0) }
+    let found = destination.withUnsafeMutableBytes { history.takeDatagram(for: 99, into: $0) }
     #expect(found == nil)
   }
 
@@ -290,7 +290,7 @@ struct NetworkAudioSenderHistoryTests {
     history.reset()
 
     var destination = [UInt8](repeating: 0, count: 64)
-    let found = destination.withUnsafeMutableBytes { history.datagram(for: 1, into: $0) }
+    let found = destination.withUnsafeMutableBytes { history.takeDatagram(for: 1, into: $0) }
     #expect(found == nil)
   }
 
@@ -449,5 +449,162 @@ struct NetworkAudioRetransmissionAskerTests {
     // being remembered forever.
     let forgotten = asker.sequencesToAsk(missing: [1], queued: .milliseconds(200), now: 0)
     #expect(forgotten == [1])
+  }
+
+  /// A request carries nothing that stops it being replayed.
+  ///
+  /// One captured off the network would otherwise make a sender resend the same audio for as long
+  /// as an attacker repeated it. A receiver asks once per gap by design, so answering once is what
+  /// it expects anyway.
+  @Test("A sequence already resent is not resent again")
+  func aSequenceIsAnsweredOnce() {
+    let history = NetworkAudioSenderHistory(depth: 8, maximumDatagramByteCount: 64)
+    let bytes: [UInt8] = Array(0..<16)
+    bytes.withUnsafeBytes { history.record(sequence: 3, datagram: $0) }
+
+    var destination = [UInt8](repeating: 0, count: 64)
+    let lengths = destination.withUnsafeMutableBytes { buffer in
+      [
+        history.takeDatagram(for: 3, into: buffer),
+        history.takeDatagram(for: 3, into: buffer),
+        history.takeDatagram(for: 3, into: buffer),
+      ]
+    }
+
+    #expect(lengths[0] == 16)
+    #expect(lengths[1] == nil)
+    #expect(lengths[2] == nil)
+  }
+
+  /// The slot is reused by a later packet, and that packet has not been answered.
+  @Test("A packet occupying a used slot may still be resent")
+  func aFreshPacketInAUsedSlotIsAnswerable() {
+    let history = NetworkAudioSenderHistory(depth: 4, maximumDatagramByteCount: 64)
+    let bytes: [UInt8] = [7]
+    bytes.withUnsafeBytes { history.record(sequence: 1, datagram: $0) }
+
+    var destination = [UInt8](repeating: 0, count: 64)
+    let first = destination.withUnsafeMutableBytes { history.takeDatagram(for: 1, into: $0) }
+    bytes.withUnsafeBytes { history.record(sequence: 5, datagram: $0) }
+    let second = destination.withUnsafeMutableBytes { history.takeDatagram(for: 5, into: $0) }
+
+    #expect(first == 1)
+    #expect(second == 1)
+  }
+}
+
+/// A request arrives on the network queue and is answered on the realtime thread, so it has to
+/// cross as data: two threads writing one packet buffer put one packet's bytes on the wire under
+/// another's sequence, and the realtime body runs where a lock is unsafe.
+@Suite("Network audio retransmission mailbox")
+struct NetworkAudioRetransmissionMailboxTests {
+  @Test("What was deposited is what comes back")
+  func depositIsTakenBack() {
+    let mailbox = NetworkAudioRetransmissionMailbox(capacity: 2)
+    let wanted: [UInt64] = [4, 9, 11]
+    let destination = UnsafeMutablePointer<UInt64>.allocate(
+      capacity: NetworkAudioRetransmissionMailbox.strideCount)
+    defer { destination.deallocate() }
+
+    #expect(mailbox.deposit(wanted))
+    let count = mailbox.take(into: destination)
+
+    #expect(count == 3)
+    #expect(Array(UnsafeBufferPointer(start: destination, count: 3)) == wanted)
+  }
+
+  @Test("Nothing waiting reads as nothing")
+  func emptyMailboxTakesNothing() {
+    let mailbox = NetworkAudioRetransmissionMailbox(capacity: 2)
+    let destination = UnsafeMutablePointer<UInt64>.allocate(
+      capacity: NetworkAudioRetransmissionMailbox.strideCount)
+    defer { destination.deallocate() }
+
+    #expect(mailbox.take(into: destination) == nil)
+  }
+
+  @Test("Requests come back in the order they arrived")
+  func orderIsKept() {
+    let mailbox = NetworkAudioRetransmissionMailbox(capacity: 4)
+    let destination = UnsafeMutablePointer<UInt64>.allocate(
+      capacity: NetworkAudioRetransmissionMailbox.strideCount)
+    defer { destination.deallocate() }
+
+    #expect(mailbox.deposit([1]))
+    #expect(mailbox.deposit([2]))
+
+    #expect(mailbox.take(into: destination) == 1)
+    #expect(destination[0] == 1)
+    #expect(mailbox.take(into: destination) == 1)
+    #expect(destination[0] == 2)
+    #expect(mailbox.take(into: destination) == nil)
+  }
+
+  /// A queue serving a realtime thread cannot wait for it, so a mailbox that has filled drops what
+  /// it cannot hold rather than blocking the network.
+  @Test("A full mailbox refuses rather than waiting")
+  func fullMailboxRefuses() {
+    let mailbox = NetworkAudioRetransmissionMailbox(capacity: 2)
+
+    #expect(mailbox.deposit([1]))
+    #expect(mailbox.deposit([2]))
+    #expect(!mailbox.deposit([3]))
+  }
+
+  @Test("Taking one makes room for another")
+  func takingMakesRoom() {
+    let mailbox = NetworkAudioRetransmissionMailbox(capacity: 1)
+    let destination = UnsafeMutablePointer<UInt64>.allocate(
+      capacity: NetworkAudioRetransmissionMailbox.strideCount)
+    defer { destination.deallocate() }
+
+    #expect(mailbox.deposit([1]))
+    #expect(!mailbox.deposit([2]))
+    _ = mailbox.take(into: destination)
+    #expect(mailbox.deposit([2]))
+  }
+
+  @Test("A request naming more than a request may name is refused")
+  func oversizedDepositIsRefused() {
+    let mailbox = NetworkAudioRetransmissionMailbox(capacity: 2)
+    let tooMany = (0..<UInt64(NetworkAudioRetransmissionMailbox.strideCount + 1)).map { $0 }
+
+    #expect(!mailbox.deposit(tooMany))
+    #expect(!mailbox.deposit([]))
+  }
+
+  /// The indices are the only synchronisation between the two threads, so they have to survive
+  /// being driven hard from both at once.
+  @Test("A producer and a consumer running together lose and invent nothing")
+  func producerAndConsumerAgree() async {
+    let mailbox = NetworkAudioRetransmissionMailbox(capacity: 4)
+    let total = 20_000
+
+    let consumer = Task.detached {
+      let destination = UnsafeMutablePointer<UInt64>.allocate(
+        capacity: NetworkAudioRetransmissionMailbox.strideCount)
+      defer { destination.deallocate() }
+      var seen: [UInt64] = []
+      while seen.count < total {
+        if let count = mailbox.take(into: destination), count > 0 {
+          seen.append(destination[0])
+        }
+      }
+      return seen
+    }
+
+    let producer = Task.detached {
+      var sent: UInt64 = 0
+      while sent < UInt64(total) {
+        if mailbox.deposit([sent]) { sent &+= 1 }
+      }
+    }
+
+    await producer.value
+    let seen = await consumer.value
+
+    #expect(seen.count == total)
+    // Order preserved and nothing duplicated or dropped.
+    #expect(seen == (0..<UInt64(total)).map { $0 })
   }
 }

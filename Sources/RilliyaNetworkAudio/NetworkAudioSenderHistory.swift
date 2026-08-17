@@ -16,6 +16,12 @@ final class NetworkAudioSenderHistory {
   private var sequences: [UInt64]
   private var lengths: [Int]
   private var present: [Bool]
+  /// Which slots have already been resent once.
+  ///
+  /// A request carries no protection against being replayed, so without this one captured request
+  /// would make a sender resend the same datagrams for as long as an attacker cared to repeat it.
+  /// A receiver asks once per gap by design, so answering once is what it expects anyway.
+  private var answered: [Bool]
 
   init(depth: Int, maximumDatagramByteCount: Int) {
     precondition(depth >= 1)
@@ -26,6 +32,7 @@ final class NetworkAudioSenderHistory {
     sequences = Array(repeating: 0, count: depth)
     lengths = Array(repeating: 0, count: depth)
     present = Array(repeating: false, count: depth)
+    answered = Array(repeating: false, count: depth)
   }
 
   deinit {
@@ -41,26 +48,34 @@ final class NetworkAudioSenderHistory {
     sequences[slot] = sequence
     lengths[slot] = datagram.count
     present[slot] = true
+    answered[slot] = false
   }
 
-  /// Copies the datagram for `sequence` into `destination`.
+  /// Copies the datagram for `sequence` into `destination`, once.
   ///
-  /// - Returns: the bytes copied, or `nil` when that packet is no longer kept.
-  func datagram(
+  /// A second request naming the same sequence gets nothing: see ``answered``.
+  ///
+  /// - Returns: the bytes copied, or `nil` when that packet is no longer kept or has already been
+  ///   resent.
+  func takeDatagram(
     for sequence: UInt64,
     into destination: UnsafeMutableRawBufferPointer
   ) -> Int? {
     let slot = Int(sequence % UInt64(depth))
-    guard present[slot], sequences[slot] == sequence else { return nil }
+    guard present[slot], sequences[slot] == sequence, !answered[slot] else { return nil }
     let length = lengths[slot]
     guard let base = destination.baseAddress, destination.count >= length else { return nil }
     base.copyMemory(from: storage.advanced(by: slot * datagramByteCount), byteCount: length)
+    answered[slot] = true
     return length
   }
 
   /// Forgets everything, as a new session must.
   func reset() {
-    for slot in 0..<depth { present[slot] = false }
+    for slot in 0..<depth {
+      present[slot] = false
+      answered[slot] = false
+    }
   }
 }
 
