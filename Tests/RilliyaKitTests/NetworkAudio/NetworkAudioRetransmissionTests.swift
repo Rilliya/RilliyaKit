@@ -310,10 +310,37 @@ struct NetworkAudioSenderHistoryTests {
     let exhausted = budget.allows(now: 0)
     #expect(!exhausted)
 
-    // One second later the bucket has refilled to its burst, not to twenty-five.
-    var afterASecond = 0
-    for _ in 0..<100 where budget.allows(now: second) { afterASecond += 1 }
-    #expect(afterASecond == Int(NetworkAudioRetransmissionBudget.burst))
+    // Two hundred milliseconds buys a fifth of a second at twenty-five a second: five, and not the
+    // burst. Measuring only where the bucket is full would see the same number whatever the rate
+    // and whatever share of it was allowed.
+    var afterAFifth = 0
+    for _ in 0..<100 where budget.allows(now: second / 5) { afterAFifth += 1 }
+    #expect(afterAFifth == 5)
+
+    // And it never refills past the burst however long it waits.
+    var afterAMinute = 0
+    for _ in 0..<100 where budget.allows(now: second * 60) { afterAMinute += 1 }
+    #expect(afterAMinute == Int(NetworkAudioRetransmissionBudget.burst))
+  }
+
+  /// The share is what bounds retransmission against the flow it rides on, so it has to be the
+  /// number that decides the rate rather than a value nothing reads.
+  @Test("A smaller share resends less")
+  func shareDecidesTheRate() {
+    let second: UInt64 = 1_000_000_000
+    var generous = NetworkAudioRetransmissionBudget(packetsPerSecond: 100, fraction: 0.25)
+    var mean = NetworkAudioRetransmissionBudget(packetsPerSecond: 100, fraction: 0.05)
+
+    for _ in 0..<100 where generous.allows(now: 0) {}
+    for _ in 0..<100 where mean.allows(now: 0) {}
+
+    var generousRefill = 0
+    for _ in 0..<100 where generous.allows(now: second / 5) { generousRefill += 1 }
+    var meanRefill = 0
+    for _ in 0..<100 where mean.allows(now: second / 5) { meanRefill += 1 }
+
+    #expect(generousRefill == 5)
+    #expect(meanRefill == 1)
   }
 
   @Test("A sender sending nothing resends nothing")
