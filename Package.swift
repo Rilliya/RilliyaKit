@@ -14,6 +14,7 @@ let package = Package(
       targets: [
         "RilliyaCore",
         "RilliyaRealtime",
+        "RilliyaAudioWorkgroup",
         "RilliyaDiscovery",
         "RilliyaCapture",
         "RilliyaDSP",
@@ -29,6 +30,7 @@ let package = Package(
     ),
     .library(name: "RilliyaCore", targets: ["RilliyaCore"]),
     .library(name: "RilliyaRealtime", targets: ["RilliyaRealtime"]),
+    .library(name: "RilliyaAudioWorkgroup", targets: ["RilliyaAudioWorkgroup"]),
     .library(name: "RilliyaDiscovery", targets: ["RilliyaDiscovery"]),
     .library(name: "RilliyaCapture", targets: ["RilliyaCapture"]),
     .library(name: "RilliyaDSP", targets: ["RilliyaDSP"]),
@@ -49,9 +51,14 @@ let package = Package(
   ],
   targets: [
     .target(
+      name: "RilliyaAudioWorkgroup",
+      linkerSettings: [.linkedFramework("AudioToolbox")]
+    ),
+    .target(
       name: "RilliyaRealtime",
       dependencies: [
-        .product(name: "Atomics", package: "swift-atomics")
+        "RilliyaAudioWorkgroup",
+        .product(name: "Atomics", package: "swift-atomics"),
       ]
     ),
     .target(name: "RilliyaCore"),
