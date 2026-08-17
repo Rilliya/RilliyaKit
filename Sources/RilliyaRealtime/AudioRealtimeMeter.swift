@@ -4,12 +4,47 @@ import CoreAudio
 import Dispatch
 import Foundation
 import RilliyaCore
-import RilliyaRealtime
 import os.lock
 
+/// What a realtime meter reports and how often.
+public struct AudioRealtimeMeterConfiguration: Equatable, Hashable, Sendable {
+  /// How many times a second a snapshot is produced.
+  public let updatesPerSecond: Int
+
+  /// How many points one channel's drawable waveform is reduced to.
+  public let waveformSampleCount: Int
+
+  /// The floor a silent channel reports rather than negative infinity.
+  public let minimumDecibels: Float
+
+  /// Creates meter controls.
+  public init(
+    updatesPerSecond: Int = 30,
+    waveformSampleCount: Int = 128,
+    minimumDecibels: Float = -80
+  ) {
+    precondition(updatesPerSecond > 0)
+    precondition(waveformSampleCount > 0)
+    self.updatesPerSecond = updatesPerSecond
+    self.waveformSampleCount = waveformSampleCount
+    self.minimumDecibels = minimumDecibels
+  }
+}
+
+/// Measures audio where measuring is all that may happen, and delivers it where drawing may.
+///
+/// Some audio only exists on the thread that renders it — a generator makes its samples as it
+/// plays them, and there is no producer elsewhere to read. Measuring has to happen there, which
+/// means into storage that is already allocated, under a lock that is only ever tried, and with
+/// nothing handed to application code. The snapshot is then delivered on a queue of its own, which
+/// is where allocating an array and calling a handler are allowed.
+///
+/// A reader that falls behind sees the newest measurement rather than a backlog, because a drawing
+/// is only ever interested in what the audio is doing now.
 @available(macOS 14.2, *)
-final class RealtimeMeterBridge: @unchecked Sendable {
-  typealias SnapshotHandler =
+public final class AudioRealtimeMeter: @unchecked Sendable {
+  /// Receives one measurement, on the meter's delivery queue rather than the audio thread.
+  public typealias SnapshotHandler =
     @Sendable (
       _ sequence: UInt64,
       _ frameCount: Int,
@@ -18,7 +53,7 @@ final class RealtimeMeterBridge: @unchecked Sendable {
 
   private let sampleRate: Double
   private let channelIDs: [AudioChannelID]
-  private let configuration: AudioMeterCaptureConfiguration
+  private let configuration: AudioRealtimeMeterConfiguration
   private let snapshotHandler: SnapshotHandler
   private let deliverySource: DispatchSourceUserDataAdd
   private let rootMeanSquares: UnsafeMutablePointer<Float>
@@ -34,10 +69,11 @@ final class RealtimeMeterBridge: @unchecked Sendable {
   private var publishedSequence: UInt64 = 0
   private var isPublishing = true
 
-  init(
+  /// Preallocates every measurement slot away from the audio thread.
+  public init(
     sampleRate: Double,
     channelIDs: [AudioChannelID],
-    configuration: AudioMeterCaptureConfiguration,
+    configuration: AudioRealtimeMeterConfiguration,
     snapshotHandler: @escaping SnapshotHandler
   ) {
     self.sampleRate = sampleRate
@@ -88,7 +124,8 @@ final class RealtimeMeterBridge: @unchecked Sendable {
     waveforms.deallocate()
   }
 
-  func consume(_ list: UnsafePointer<AudioBufferList>) {
+  /// Measures one CoreAudio buffer list, on the thread that produced it.
+  public func consume(_ list: UnsafePointer<AudioBufferList>) {
     let buffers = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: list))
     guard let firstBuffer = buffers.first else { return }
     let firstChannelCount = max(Int(firstBuffer.mNumberChannels), 1)
@@ -133,10 +170,60 @@ final class RealtimeMeterBridge: @unchecked Sendable {
       }
     }
 
-    while channelIndex < channelIDs.count {
-      let waveform = waveforms.advanced(
-        by: channelIndex * configuration.waveformSampleCount
+    silenceChannels(from: channelIndex)
+    latestFrameCount = frameCount
+    sequence &+= 1
+    deliverySource.add(data: 1)
+  }
+
+  /// Measures noninterleaved channels, on the thread that produced them.
+  ///
+  /// What audio made inside a render graph has to use: a generator writes its channels straight
+  /// into the graph's buffers and there is no buffer list to hand over. Deliberately not shared
+  /// with the buffer-list path through a closure — this runs on the audio thread, where a call
+  /// through an unknown function is the thing being avoided.
+  public func consume(
+    planar channels: UnsafeBufferPointer<UnsafeMutablePointer<Float>>,
+    frameCount: Int
+  ) {
+    guard frameCount > 0 else { return }
+    framesUntilUpdate -= frameCount
+    guard framesUntilUpdate <= 0 else { return }
+    framesUntilUpdate = max(1, Int(sampleRate / Double(configuration.updatesPerSecond)))
+    guard os_unfair_lock_trylock(&storageLock) else { return }
+    defer { os_unfair_lock_unlock(&storageLock) }
+    guard isPublishing else { return }
+
+    var channelIndex = 0
+    while channelIndex < min(channels.count, channelIDs.count) {
+      let waveform = waveforms.advanced(by: channelIndex * configuration.waveformSampleCount)
+      let scalars = AudioMeterDSP.writeMeasurement(
+        samples: channels[channelIndex],
+        frameCount: frameCount,
+        sampleStride: 1,
+        waveformSampleCount: configuration.waveformSampleCount,
+        minimumDecibels: configuration.minimumDecibels,
+        waveformOutput: waveform
       )
+      rootMeanSquares[channelIndex] = scalars.rootMeanSquare
+      peaks[channelIndex] = scalars.peak
+      decibels[channelIndex] = scalars.decibels
+      clipping[channelIndex] = scalars.isClipping
+      waveformCounts[channelIndex] = scalars.waveformCount
+      channelIndex += 1
+    }
+
+    silenceChannels(from: channelIndex)
+    latestFrameCount = frameCount
+    sequence &+= 1
+    deliverySource.add(data: 1)
+  }
+
+  /// Reports silence for channels this measurement did not reach.
+  private func silenceChannels(from firstChannelIndex: Int) {
+    var channelIndex = firstChannelIndex
+    while channelIndex < channelIDs.count {
+      let waveform = waveforms.advanced(by: channelIndex * configuration.waveformSampleCount)
       waveform.update(repeating: 0, count: configuration.waveformSampleCount)
       rootMeanSquares[channelIndex] = 0
       peaks[channelIndex] = 0
@@ -145,13 +232,10 @@ final class RealtimeMeterBridge: @unchecked Sendable {
       waveformCounts[channelIndex] = 0
       channelIndex += 1
     }
-
-    latestFrameCount = frameCount
-    sequence &+= 1
-    deliverySource.add(data: 1)
   }
 
-  func stopPublishing() {
+  /// Stops delivering, so a meter outliving its producer reports nothing rather than stale audio.
+  public func stopPublishing() {
     os_unfair_lock_lock(&storageLock)
     isPublishing = false
     os_unfair_lock_unlock(&storageLock)

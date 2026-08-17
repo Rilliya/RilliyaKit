@@ -35,7 +35,7 @@ private final class CoreAudioDeviceOutputCaptureResource:
   private let lock = NSLock()
   private let compatibilitySubscription: AudioRealtimeFrameSubscription
   private let ioQueue: DispatchQueue
-  private let meterBridge: RealtimeMeterBridge?
+  private let meterBridge: AudioRealtimeMeter?
   private var tapID: AudioObjectID
   private var aggregateID: AudioObjectID
   private var ioProcedureID: AudioDeviceIOProcID?
@@ -140,10 +140,10 @@ private final class CoreAudioDeviceOutputCaptureResource:
       )
       meterBridge =
         configuration.publishesMeterSnapshots
-        ? RealtimeMeterBridge(
+        ? AudioRealtimeMeter(
           sampleRate: format.sampleRate,
           channelIDs: format.channelIDs,
-          configuration: configuration,
+          configuration: configuration.meter,
           snapshotHandler: { sequence, frameCount, channels in
             snapshotHandler(
               DeviceOutputMeterSnapshot(

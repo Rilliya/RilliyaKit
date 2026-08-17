@@ -29,6 +29,15 @@ public struct AudioCaptureConfiguration: Hashable, Sendable {
   /// Every capture also reserves one queue for its compatibility `frameBuffer` view.
   public let maximumAdditionalFrameSubscriberCount: Int
 
+  /// The part of this a meter needs, which is what it is given rather than the whole.
+  public var meter: AudioRealtimeMeterConfiguration {
+    AudioRealtimeMeterConfiguration(
+      updatesPerSecond: updatesPerSecond,
+      waveformSampleCount: waveformSampleCount,
+      minimumDecibels: minimumDecibels
+    )
+  }
+
   /// Creates a bounded meter capture configuration.
   ///
   /// Values are clamped to safe ranges: 1...60 updates per second, 1...512 waveform samples,
