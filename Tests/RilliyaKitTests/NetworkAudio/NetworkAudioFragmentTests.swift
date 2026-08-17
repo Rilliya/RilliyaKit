@@ -427,7 +427,7 @@ struct NetworkAudioLosslessDatagramTests {
         encoding: .appleLossless
       )
     )
-    try sender.start()
+    try await sender.start()
     defer { Task { await sender.stop() } }
 
     // Enough blocks that a whole one is split and sent.

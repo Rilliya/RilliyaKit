@@ -64,8 +64,8 @@ struct NetworkAudioReceiverGuardTests {
       configuration: try NetworkAudioSenderConfiguration(
         host: "127.0.0.1", port: port, format: format)
     )
-    try receiver.start()
-    try sender.start()
+    try await receiver.start()
+    try await sender.start()
 
     try await Self.feed(sender, blocks: 20)
     try await Task.sleep(for: .milliseconds(200))
@@ -91,13 +91,13 @@ struct NetworkAudioReceiverGuardTests {
   /// receiver goes on reading audio from. The window is too narrow to hit by timing, so the
   /// handler's own decision is driven directly: a stopped receiver must take nothing.
   @Test("A connection offered after a stop is refused rather than tracked")
-  func connectionAfterStopIsRefused() throws {
+  func connectionAfterStopIsRefused() async throws {
     let port: UInt16 = 49_504
     let format = try NetworkAudioStreamFormat(sampleRate: 48_000, channelCount: 2)
     let receiver = try NetworkAudioReceiver(
       configuration: try NetworkAudioReceiverConfiguration(port: port, format: format)
     )
-    try receiver.start()
+    try await receiver.start()
 
     let running = NWConnection(host: "127.0.0.1", port: 9, using: .udp)
     receiver.accept(running)

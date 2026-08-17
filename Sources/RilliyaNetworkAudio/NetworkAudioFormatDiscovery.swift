@@ -48,7 +48,8 @@ public enum NetworkAudioFormatDiscovery {
   ///
   /// - Parameters:
   ///   - port: the local UDP port to listen on.
-  ///   - sharedKey: the key the sender is using, or `nil` to accept audio in the clear.
+  ///   - keyProvider: where the key the sender is using comes from, or `nil` to accept audio in
+  ///     the clear. Asked once, before the port is bound.
   ///   - maximumDatagramByteCount: the largest datagram considered.
   ///   - timeout: how long to wait before giving up.
   /// - Returns: the format the first accepted packet declares.
@@ -56,7 +57,7 @@ public enum NetworkAudioFormatDiscovery {
   ///   passes with nothing acceptable on it, or the controls are outside the bounded policy.
   public static func discover(
     port: UInt16,
-    sharedKey: NetworkAudioSharedKey? = nil,
+    keyProvider: (any NetworkAudioKeyProvider)? = nil,
     maximumDatagramByteCount: Int = NetworkAudioSenderConfiguration
       .defaultMaximumDatagramByteCount,
     timeout: Duration = .seconds(30)
@@ -68,7 +69,7 @@ public enum NetworkAudioFormatDiscovery {
     guard timeout > .zero else { throw NetworkAudioFormatDiscoveryError.invalidTimeout }
 
     let session = DiscoverySession(
-      sharedKey: sharedKey,
+      sharedKey: try await keyProvider?.sharedKey(),
       maximumDatagramByteCount: maximumDatagramByteCount
     )
     return try await withTaskCancellationHandler {

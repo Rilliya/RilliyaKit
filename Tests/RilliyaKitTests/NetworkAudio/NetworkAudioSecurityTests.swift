@@ -274,8 +274,7 @@ struct NetworkAudioEncryptedWireTests {
   /// could bypass the key by simply not using it.
   @Test("A receiver with a key rejects plaintext")
   func rejectsDowngrade() throws {
-    let cipher = NetworkAudioSessionCipher(
-      sharedKey: .random(), sessionID: Fixture.sessionID)
+    let cipher = NetworkAudioSessionCipher(sharedKey: .random(), sessionID: Fixture.sessionID)
     let harness = try WireHarness()
     let plain = try harness.encode(sequence: 1, cipher: nil)
 
@@ -286,8 +285,7 @@ struct NetworkAudioEncryptedWireTests {
 
   @Test("A receiver without a key rejects encrypted audio")
   func rejectsUnreadableCiphertext() throws {
-    let cipher = NetworkAudioSessionCipher(
-      sharedKey: .random(), sessionID: Fixture.sessionID)
+    let cipher = NetworkAudioSessionCipher(sharedKey: .random(), sessionID: Fixture.sessionID)
     let harness = try WireHarness()
     let sealed = try harness.encode(sequence: 1, cipher: cipher)
 
@@ -303,8 +301,7 @@ struct NetworkAudioEncryptedWireTests {
       sequence: 1,
       cipher: NetworkAudioSessionCipher(sharedKey: .random(), sessionID: Fixture.sessionID)
     )
-    let eavesdropper = NetworkAudioSessionCipher(
-      sharedKey: .random(), sessionID: Fixture.sessionID)
+    let eavesdropper = NetworkAudioSessionCipher(sharedKey: .random(), sessionID: Fixture.sessionID)
 
     #expect(throws: NetworkAudioSecurityError.authenticationFailed) {
       _ = try NetworkAudioPacketCodec.decode(sealed, cipher: eavesdropper)
@@ -447,8 +444,9 @@ struct NetworkAudioEncryptedIngestTests {
         configuration: try NetworkAudioReceiverConfiguration(
           port: Fixture.port,
           format: format,
-          sharedKey: receiverKey
+          keyProvider: receiverKey.map(NetworkAudioStaticKeyProvider.init)
         ),
+        sharedKey: receiverKey,
         frameBuffer: frameBuffer
       )
       cipher = senderKey.map {

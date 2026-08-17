@@ -66,7 +66,7 @@ struct NetworkAudioFormatDiscoveryTests {
     await #expect(throws: NetworkAudioFormatDiscoveryError.timedOut) {
       _ = try await NetworkAudioFormatDiscovery.discover(
         port: port,
-        sharedKey: .random(),
+        keyProvider: NetworkAudioStaticKeyProvider(.random()),
         timeout: .milliseconds(400)
       )
     }
@@ -84,7 +84,7 @@ struct NetworkAudioFormatDiscoveryTests {
     await #expect(throws: NetworkAudioFormatDiscoveryError.timedOut) {
       _ = try await NetworkAudioFormatDiscovery.discover(
         port: port,
-        sharedKey: .random(),
+        keyProvider: NetworkAudioStaticKeyProvider(.random()),
         timeout: .milliseconds(400)
       )
     }
@@ -98,7 +98,7 @@ struct NetworkAudioFormatDiscoveryTests {
 
     async let discovered = NetworkAudioFormatDiscovery.discover(
       port: port,
-      sharedKey: key,
+      keyProvider: NetworkAudioStaticKeyProvider(key),
       timeout: .seconds(5)
     )
     let sender = try Fixture.repeatedlySend(

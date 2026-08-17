@@ -6,7 +6,7 @@ import RilliyaCore
 import RilliyaRealtime
 
 /// Bounded controls for one direct UDP network-audio receiver.
-public struct NetworkAudioReceiverConfiguration: Equatable, Hashable, Sendable {
+public struct NetworkAudioReceiverConfiguration: Sendable {
   /// The deepest reorder window, past which holding costs more delay than a tunnel ever saves.
   public static let maximumReorderDepth = 64
 
@@ -48,11 +48,11 @@ public struct NetworkAudioReceiverConfiguration: Equatable, Hashable, Sendable {
   /// packets before the gap is conceded. `1` holds nothing.
   public let reorderDepth: Int
 
-  /// The key both peers share, or `nil` to accept audio in the clear.
+  /// Where the key both peers share comes from, or `nil` to accept audio in the clear.
   ///
-  /// A configured key also rejects unencrypted datagrams, so reaching the port is not enough to
-  /// be heard.
-  public let sharedKey: NetworkAudioSharedKey?
+  /// Asked once, when the receiver starts, and held for that run. A configured key also rejects
+  /// unencrypted datagrams, so reaching the port is not enough to be heard.
+  public let keyProvider: (any NetworkAudioKeyProvider)?
 
   /// Creates validated receiver controls with bounded packet and PCM storage.
   public init(
@@ -66,7 +66,7 @@ public struct NetworkAudioReceiverConfiguration: Equatable, Hashable, Sendable {
     reorderDepth: Int = 8,
     requestsRetransmission: Bool = true,
     waveformUpdatesPerSecond: Int = AudioWaveformMeter.defaultUpdatesPerSecond,
-    sharedKey: NetworkAudioSharedKey? = nil
+    keyProvider: (any NetworkAudioKeyProvider)? = nil
   ) throws {
     guard port > 0 else { throw NetworkAudioReceiverError.invalidPort }
     let minimumDatagramByteCount =
@@ -98,7 +98,7 @@ public struct NetworkAudioReceiverConfiguration: Equatable, Hashable, Sendable {
     self.reorderDepth = reorderDepth
     self.requestsRetransmission = requestsRetransmission
     self.waveformUpdatesPerSecond = waveformUpdatesPerSecond
-    self.sharedKey = sharedKey
+    self.keyProvider = keyProvider
   }
 }
 
@@ -184,7 +184,7 @@ public struct NetworkAudioReceiverStatistics: Equatable, Sendable {
 ///
 /// Every datagram is length- and format-validated before its samples reach ``frameBuffer``, and
 /// malformed traffic is discarded. Confidentiality and peer authentication come from
-/// ``NetworkAudioReceiverConfiguration/sharedKey`` and are absent without one: UDP itself offers
+/// ``NetworkAudioReceiverConfiguration/keyProvider`` and are absent without one: UDP itself offers
 /// neither, so an unkeyed session can be read and written by anything that can reach the port.
 /// Congestion control this does not provide at all, which is what confines it to a local network.
 public final class NetworkAudioReceiver: @unchecked Sendable {
@@ -272,7 +272,24 @@ public final class NetworkAudioReceiver: @unchecked Sendable {
   }
 
   /// Starts listening on the configured local UDP port.
-  public func start() throws {
+  public func start() async throws {
+    // Nothing is asked for unless this is going to start. A provider may sign in, prompt, or call
+    // a service, and starting a running receiver is documented as doing nothing — so it must not
+    // quietly cost any of that. The locked start below checks again.
+    switch lock.withLock({ state }) {
+    case .running: return
+    case .stopped: throw NetworkAudioReceiverError.alreadyStopped
+    case .ready: break
+    }
+    // Asked once and held for this run, before anything is locked: a provider may take as long as
+    // a sign-in does, and a key that changed partway through would leave the peers unable to hear
+    // each other with nothing to say why.
+    let sharedKey = try await configuration.keyProvider?.sharedKey()
+    ingestor.useSharedKey(sharedKey)
+    try start(withResolvedKey: ())
+  }
+
+  private func start(withResolvedKey _: Void) throws {
     try lock.withLock {
       switch state {
       case .running:
@@ -404,13 +421,17 @@ final class NetworkAudioPacketIngestor {
   private var retransmissionRequestCount: UInt64 = 0
   private var retransmissionRecoveredCount: UInt64 = 0
   private var undecodablePacketCount: UInt64 = 0
+  /// The key this run was given, or `nil` while the stream is in the clear.
+  private var resolvedSharedKey: NetworkAudioSharedKey?
   private var lastAcceptedTime: UInt64 = 0
 
   init(
     configuration: NetworkAudioReceiverConfiguration,
+    sharedKey: NetworkAudioSharedKey? = nil,
     frameBuffer: AudioRealtimeFrameBuffer
   ) throws {
     self.configuration = configuration
+    self.resolvedSharedKey = sharedKey
     self.frameBuffer = frameBuffer
     // Uncompressed, a datagram's size bounds the block it can carry. Compressed, it does not:
     // one small datagram can carry the longest block Opus defines, so storage covers both.
@@ -598,8 +619,16 @@ final class NetworkAudioPacketIngestor {
   /// Written under the same lock it is read under. Only the listener's queue reaches this today,
   /// so nothing races on it yet; leaving the write outside the lock would make that an accident of
   /// how connections happen to be scheduled rather than something the code says.
+  /// Holds what the provider gave this run, so nothing has to ask again per datagram.
+  ///
+  /// A receiver resolves before it starts and calls this; a caller driving the ingestor directly
+  /// hands the key to ``init(configuration:sharedKey:frameBuffer:)`` instead.
+  func useSharedKey(_ key: NetworkAudioSharedKey?) {
+    statisticsLock.withLock { resolvedSharedKey = key }
+  }
+
   private func cipher(for data: Data) throws -> NetworkAudioSessionCipher? {
-    guard let sharedKey = configuration.sharedKey else { return nil }
+    guard let sharedKey = statisticsLock.withLock({ resolvedSharedKey }) else { return nil }
     let sessionID = try NetworkAudioPacketCodec.sessionID(of: data)
     return statisticsLock.withLock {
       if cipherSessionID != sessionID {

@@ -69,8 +69,7 @@ struct NetworkAudioRetransmissionRequestTests {
       sequence: 1,
       sequences: [10]
     )
-    let cipher = NetworkAudioSessionCipher(
-      sharedKey: .random(), sessionID: Fixture.sessionID)
+    let cipher = NetworkAudioSessionCipher(sharedKey: .random(), sessionID: Fixture.sessionID)
 
     #expect(throws: (any Error).self) {
       _ = try NetworkAudioRetransmissionRequest.decode(try request.encoded(), cipher: cipher)

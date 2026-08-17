@@ -28,7 +28,7 @@ struct NetworkAudioSenderTests {
         port: port,
         format: try format(),
         encoding: encoding,
-        sharedKey: sharedKey
+        keyProvider: sharedKey.map(NetworkAudioStaticKeyProvider.init)
       )
     }
   }
@@ -47,8 +47,8 @@ struct NetworkAudioSenderTests {
 
     #expect(first.activeSessionID == nil)
 
-    try first.start()
-    try second.start()
+    try await first.start()
+    try await second.start()
     let left = first.activeSessionID
     let right = second.activeSessionID
     await first.stop()
@@ -66,13 +66,13 @@ struct NetworkAudioSenderTests {
   @Test("A stopped sender is not started again")
   func stoppedSenderIsNotRestarted() async throws {
     let sender = try NetworkAudioSender(configuration: try Fixture.configuration())
-    try sender.start()
+    try await sender.start()
     let ran = sender.activeSessionID
     await sender.stop()
 
     #expect(ran != nil)
-    #expect(throws: NetworkAudioSenderError.alreadyStopped) {
-      try sender.start()
+    await #expect(throws: NetworkAudioSenderError.alreadyStopped) {
+      try await sender.start()
     }
   }
 
@@ -81,9 +81,9 @@ struct NetworkAudioSenderTests {
   @Test("Starting a running sender changes nothing")
   func doubleStartIsANoOp() async throws {
     let sender = try NetworkAudioSender(configuration: try Fixture.configuration())
-    try sender.start()
+    try await sender.start()
     let first = sender.activeSessionID
-    try sender.start()
+    try await sender.start()
     let second = sender.activeSessionID
     await sender.stop()
 
@@ -177,8 +177,8 @@ struct NetworkAudioMeteringTests {
 
     #expect(receiver.meterSnapshot().isEmpty, "nothing has arrived yet")
 
-    try receiver.start()
-    try sender.start()
+    try await receiver.start()
+    try await sender.start()
     defer {
       Task {
         await sender.stop()
@@ -232,8 +232,8 @@ struct NetworkAudioMeteringTests {
       configuration: try NetworkAudioSenderConfiguration(
         host: "127.0.0.1", port: 48_997, format: format, framesPerPacket: 128)
     )
-    try receiver.start()
-    try sender.start()
+    try await receiver.start()
+    try await sender.start()
 
     let feeding = Task {
       let quantum = 128

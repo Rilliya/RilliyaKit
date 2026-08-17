@@ -6,7 +6,7 @@ import Network
 import RilliyaRealtime
 
 /// Bounded controls for one direct UDP network-audio sender.
-public struct NetworkAudioSenderConfiguration: Equatable, Hashable, Sendable {
+public struct NetworkAudioSenderConfiguration: Sendable {
   /// The recent packets a sender keeps by default.
   ///
   /// Enough to answer for a round trip plus the window a receiver reorders over, which at ten
@@ -40,8 +40,11 @@ public struct NetworkAudioSenderConfiguration: Equatable, Hashable, Sendable {
   /// The largest emitted datagram, including its protocol header.
   public let maximumDatagramByteCount: Int
 
-  /// The key both peers share, or `nil` to send in the clear.
-  public let sharedKey: NetworkAudioSharedKey?
+  /// Where the key both peers share comes from, or `nil` to send in the clear.
+  ///
+  /// Asked once, when the sender starts, and held for that run. Its presence is also what decides
+  /// how much room a datagram leaves, because a sealed packet carries a tag.
+  public let keyProvider: (any NetworkAudioKeyProvider)?
 
   /// How the payload is represented on the wire.
   public let encoding: NetworkAudioWireEncoding
@@ -72,7 +75,7 @@ public struct NetworkAudioSenderConfiguration: Equatable, Hashable, Sendable {
     encoding: NetworkAudioWireEncoding = .interleavedFloat32,
     opusBitRate: Int = NetworkAudioSenderConfiguration.defaultOpusBitRate,
     retransmissionDepth: Int = NetworkAudioSenderConfiguration.defaultRetransmissionDepth,
-    sharedKey: NetworkAudioSharedKey? = nil
+    keyProvider: (any NetworkAudioKeyProvider)? = nil
   ) throws {
     let normalizedHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !normalizedHost.isEmpty, normalizedHost.utf8.count <= 255 else {
@@ -104,10 +107,10 @@ public struct NetworkAudioSenderConfiguration: Equatable, Hashable, Sendable {
     self.encoding = encoding
     self.opusBitRate = opusBitRate
     self.retransmissionDepth = retransmissionDepth
-    self.sharedKey = sharedKey
+    self.keyProvider = keyProvider
     let payloadRoom =
       maximumDatagramByteCount - NetworkAudioPacketCodec.headerByteCount
-      - (sharedKey == nil ? 0 : NetworkAudioSessionCipher.tagByteCount)
+      - (keyProvider == nil ? 0 : NetworkAudioSessionCipher.tagByteCount)
     guard payloadRoom >= 1 else { throw NetworkAudioSenderError.invalidDatagramBound }
 
     switch encoding {
@@ -169,7 +172,7 @@ public struct NetworkAudioSenderConfiguration: Equatable, Hashable, Sendable {
   /// The compressed bytes one packet may carry, which the datagram bound decides.
   var maximumCompressedPacketByteCount: Int {
     maximumDatagramByteCount - NetworkAudioPacketCodec.headerByteCount
-      - (sharedKey == nil ? 0 : NetworkAudioSessionCipher.tagByteCount)
+      - (keyProvider == nil ? 0 : NetworkAudioSessionCipher.tagByteCount)
   }
 
   /// The time handing one datagram to Network.framework is allowed to take.
@@ -211,7 +214,7 @@ public struct NetworkAudioSenderConfiguration: Equatable, Hashable, Sendable {
   var maximumFrameCountPerPacket: Int {
     let overhead =
       NetworkAudioPacketCodec.headerByteCount
-      + (sharedKey == nil ? 0 : NetworkAudioSessionCipher.tagByteCount)
+      + (keyProvider == nil ? 0 : NetworkAudioSessionCipher.tagByteCount)
     return (maximumDatagramByteCount - overhead) / format.channelCount
       / MemoryLayout<Float>.stride
   }
@@ -372,7 +375,25 @@ public final class NetworkAudioSender: @unchecked Sendable {
   }
 
   /// Starts the deadline-scheduled packet worker and its connection.
-  public func start() throws {
+  public func start() async throws {
+    // Nothing is asked for unless this is going to start. A provider may sign in, prompt, or call
+    // a service, and starting a running sender is documented as doing nothing — so it must not
+    // quietly cost any of that. The locked start below checks again, so a state that changes in
+    // between is still handled there.
+    switch lock.withLock({ state }) {
+    case .running: return
+    case .stopped: throw NetworkAudioSenderError.alreadyStopped
+    case .ready: break
+    }
+    // The key is asked for once and held for this run: the session key is derived from it and the
+    // run's identity, so one that changed partway through would leave the peers unable to hear
+    // each other with nothing to say why. Asking happens before anything is locked, because a
+    // provider may take as long as a sign-in does.
+    let sharedKey = try await configuration.keyProvider?.sharedKey()
+    try start(sharedKey: sharedKey)
+  }
+
+  private func start(sharedKey: NetworkAudioSharedKey?) throws {
     lock.lock()
     defer { lock.unlock() }
     switch state {
@@ -409,6 +430,7 @@ public final class NetworkAudioSender: @unchecked Sendable {
     let packets = NetworkAudioSenderPacketizer(
       configuration: configuration,
       sessionID: runSessionID,
+      sharedKey: sharedKey,
       frameBuffer: frameBuffer
     )
     let worker = AudioRealtimeWorker(
@@ -509,12 +531,13 @@ private final class NetworkAudioSenderPacketizer: @unchecked Sendable {
   init(
     configuration: NetworkAudioSenderConfiguration,
     sessionID: UUID,
+    sharedKey: NetworkAudioSharedKey?,
     frameBuffer: AudioRealtimeFrameBuffer
   ) {
     self.configuration = configuration
     self.sessionID = sessionID
     self.frameBuffer = frameBuffer
-    cipher = configuration.sharedKey.map {
+    cipher = sharedKey.map {
       NetworkAudioSessionCipher(sharedKey: $0, sessionID: sessionID)
     }
     let storage = (0..<configuration.format.channelCount).map { _ in
