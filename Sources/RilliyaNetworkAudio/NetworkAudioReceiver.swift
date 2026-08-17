@@ -330,6 +330,8 @@ final class NetworkAudioPacketIngestor {
   private let interleavedStorage: UnsafeMutablePointer<Float>
   private let silenceStorage: UnsafeMutablePointer<Float>
   private let maximumFrameCount: Int
+  /// The samples ``interleavedStorage`` holds, which bounds every write into it.
+  private let sampleCapacity: Int
   private let statisticsLock = NSLock()
   private var acceptedPacketCount: UInt64 = 0
   private var rejectedPacketCount: UInt64 = 0
@@ -380,7 +382,10 @@ final class NetworkAudioPacketIngestor {
       blockCount: 2,
       maximumFragmentByteCount: configuration.maximumDatagramByteCount
     )
+    self.sampleCapacity = sampleCapacity
     interleavedStorage = .allocate(capacity: sampleCapacity)
+    // Initialized rather than left raw: anything that reads further than the last packet wrote
+    // then reads silence instead of whatever the heap happened to hold.
     silenceStorage = .allocate(capacity: sampleCapacity)
     silenceStorage.initialize(repeating: 0, count: sampleCapacity)
   }
@@ -621,7 +626,10 @@ final class NetworkAudioPacketIngestor {
   private func decodePayload(_ payload: Data) {
     payload.withUnsafeBytes { rawBytes in
       let bytes = rawBytes.bindMemory(to: UInt8.self)
-      let sampleCount = payload.count / MemoryLayout<Float>.stride
+      // Bounded by the storage as well as by the payload. The header rules ahead of this already
+      // tie the two together; this is what makes a mistake in them a short packet rather than a
+      // write past the buffer.
+      let sampleCount = min(payload.count / MemoryLayout<Float>.stride, sampleCapacity)
       for sampleIndex in 0..<sampleCount {
         let byteIndex = sampleIndex * MemoryLayout<Float>.stride
         let bits =

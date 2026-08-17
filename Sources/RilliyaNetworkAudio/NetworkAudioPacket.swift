@@ -143,6 +143,12 @@ public struct NetworkAudioPacket: Equatable, Sendable {
     guard frameCount > 0 else {
       throw NetworkAudioPacketError.invalidFrameCount(frameCount)
     }
+    // Only a compressed block can be wider than a datagram, so only a compressed packet may be a
+    // piece of one. Samples are sized to fit by construction, and waiving the payload-length rule
+    // below for them would let a packet claim more than it carries.
+    if fragment != nil, encoding == .interleavedFloat32 {
+      throw NetworkAudioPacketError.unsupportedFlags(NetworkAudioPacketCodec.fragmentedFlag)
+    }
     // A fragment carries part of a block, so its size says nothing about what the block holds.
     guard
       fragment != nil
@@ -284,8 +290,14 @@ public enum NetworkAudioPacketCodec {
   private static let magic: UInt32 = 0x524C_5941  // RLYA
 
   /// Serializes a validated packet using network byte order and little-endian Float32 payloads.
+  ///
+  /// Carries everything the packet holds, including which piece of a block it is and any codec
+  /// configuration, so what comes back out of ``decode(_:cipher:)`` is what went in.
   public static func encode(_ packet: NetworkAudioPacket) throws -> Data {
-    let datagramByteCount = headerByteCount + packet.payload.count
+    let fragmentByteCount = packet.fragment == nil ? 0 : NetworkAudioPacketFragment.headerByteCount
+    let datagramByteCount =
+      headerByteCount + fragmentByteCount + packet.payload.count
+      + packet.codecConfiguration.count
     guard datagramByteCount <= maximumDatagramByteCount else {
       throw NetworkAudioPacketError.datagramTooLarge
     }
@@ -294,15 +306,20 @@ public enum NetworkAudioPacketCodec {
     data.appendInteger(magic)
     data.append(version)
     data.append(packet.encoding.rawValue)
-    data.appendInteger(UInt16(0))
+    data.appendInteger(packet.fragment == nil ? UInt16(0) : fragmentedFlag)
     withUnsafeBytes(of: packet.sessionID.uuid) { data.append(contentsOf: $0) }
     data.appendInteger(packet.sequence)
     data.appendInteger(UInt32(packet.format.sampleRate.rounded()))
     data.appendInteger(UInt16(packet.format.channelCount))
     data.appendInteger(UInt16(packet.frameCount))
     data.appendInteger(UInt32(packet.payload.count))
-    data.appendInteger(UInt32(0))
+    data.appendInteger(UInt32(packet.codecConfiguration.count))
+    if let fragment = packet.fragment {
+      data.appendInteger(UInt16(fragment.index))
+      data.appendInteger(UInt16(fragment.count))
+    }
     data.append(packet.payload)
+    data.append(packet.codecConfiguration)
     return data
   }
 
@@ -460,6 +477,9 @@ public enum NetworkAudioPacketCodec {
     }
     var fragment: NetworkAudioPacketFragment?
     if isFragmented {
+      // Only a compressed block can be wider than a datagram; samples are sized to fit one by
+      // construction. The flag also waives the payload-length rule below, so honouring it on
+      // uncompressed audio let one datagram claim a payload longer than a receiver's storage.
       let index = Int(try cursor.readInteger(as: UInt16.self))
       let count = Int(try cursor.readInteger(as: UInt16.self))
       fragment = try NetworkAudioPacketFragment(index: index, count: count)

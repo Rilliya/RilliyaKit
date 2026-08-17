@@ -95,6 +95,131 @@ struct NetworkAudioPacketFuzzTests {
     }
   }
 
+  /// The fragmented flag waives the rule tying a payload's length to the frames it claims.
+  ///
+  /// That is right for a piece of a compressed block, which says nothing about the block.
+  /// Honouring it on uncompressed audio waived the rule for samples too, and nothing downstream
+  /// looked at the flag again: one datagram could name a payload longer than the receiver's
+  /// storage and be copied into it.
+  ///
+  /// The flag belongs to compressed encodings only, which is what both of these check.
+  @Test("Uncompressed audio cannot claim to be a fragment")
+  func uncompressedFragmentIsRefused() throws {
+    let format = try NetworkAudioStreamFormat(sampleRate: 48_000, channelCount: 2)
+
+    #expect(throws: NetworkAudioPacketError.self) {
+      _ = try NetworkAudioPacket(
+        sessionID: UUID(),
+        sequence: 1,
+        format: format,
+        frameCount: 1,
+        payload: Data(count: 1_100),
+        encoding: .interleavedFloat32,
+        fragment: try NetworkAudioPacketFragment(index: 0, count: 2)
+      )
+    }
+  }
+
+  /// Encoding a packet used to write a zero where its flags belong, so which piece of a block a
+  /// packet was — and any codec configuration it carried — was dropped on the way out and could
+  /// never come back.
+  @Test("A packet keeps its place in a block and its configuration through a round trip")
+  func packetRoundTripsWithEverythingItHolds() throws {
+    let format = try NetworkAudioStreamFormat(sampleRate: 48_000, channelCount: 2)
+    let packet = try NetworkAudioPacket(
+      sessionID: UUID(),
+      sequence: 9,
+      format: format,
+      frameCount: 4_096,
+      payload: Data((0..<300).map { UInt8($0 % 251) }),
+      encoding: .appleLossless,
+      codecConfiguration: Data((0..<24).map { UInt8($0) }),
+      fragment: try NetworkAudioPacketFragment(index: 3, count: 20)
+    )
+
+    let decoded = try NetworkAudioPacketCodec.decode(
+      try NetworkAudioPacketCodec.encode(packet))
+
+    #expect(decoded.fragment == packet.fragment)
+    #expect(decoded.codecConfiguration == packet.codecConfiguration)
+    #expect(decoded.payload == packet.payload)
+    #expect(decoded.encoding == packet.encoding)
+    #expect(decoded == packet)
+  }
+
+  /// The header is not authenticated when no key is set, so the flag has to be refused on the way
+  /// in rather than trusted because a sender would not have set it.
+  @Test("A forged uncompressed fragment is refused on the way in")
+  func forgedUncompressedFragmentIsRefused() throws {
+    let format = try NetworkAudioStreamFormat(sampleRate: 48_000, channelCount: 2)
+    // A legitimate compressed fragment, which is the only kind that may carry the flag.
+    let compressed = try NetworkAudioPacket(
+      sessionID: UUID(),
+      sequence: 1,
+      format: format,
+      frameCount: 480,
+      payload: Data(count: 1_100),
+      encoding: .opus,
+      fragment: try NetworkAudioPacketFragment(index: 0, count: 2)
+    )
+    var datagram = try NetworkAudioPacketCodec.encode(compressed)
+
+    // Byte 5 is the encoding: claim samples while keeping the fragmented flag.
+    #expect(datagram[5] == NetworkAudioWireEncoding.opus.rawValue)
+    datagram[5] = NetworkAudioWireEncoding.interleavedFloat32.rawValue
+
+    #expect(throws: NetworkAudioPacketError.self) {
+      _ = try NetworkAudioPacketCodec.decode(datagram)
+    }
+
+    // And the receiver refuses it rather than copying the payload into storage sized for a block.
+    //
+    // Seven channels on purpose: no codec carries that count, so the receiver's storage is sized
+    // by the uncompressed block alone and is smaller than a datagram. Channel counts a codec does
+    // carry hide the overrun behind the larger compressed bound.
+    let wide = try NetworkAudioStreamFormat(sampleRate: 48_000, channelCount: 7)
+    let frameBuffer = try AudioRealtimeFrameBuffer(
+      format: AudioProcessingFormat(sampleRate: 48_000, channelCount: 7)
+    )
+    let ingestor = try NetworkAudioPacketIngestor(
+      configuration: try NetworkAudioReceiverConfiguration(
+        port: 48_620,
+        format: wide,
+        maximumDatagramByteCount: 1_195
+      ),
+      frameBuffer: frameBuffer
+    )
+    let forged = try Self.forgedWideFragment(sessionID: compressed.sessionID, format: wide)
+    let outcome = ingestor.ingest(forged, now: 0)
+
+    if case .accepted = outcome {
+      Issue.record("a forged uncompressed fragment was accepted")
+    }
+    #expect(frameBuffer.statistics().writtenFrameCount == 0)
+  }
+
+  /// One datagram claiming samples, the fragmented flag, and a payload far longer than seven
+  /// channels of one frame.
+  private static func forgedWideFragment(
+    sessionID: UUID,
+    format: NetworkAudioStreamFormat
+  ) throws -> Data {
+    // One frame, so the frame-count bound is satisfied, and a payload far longer than one frame of
+    // seven channels — which only the fragmented flag let past.
+    let honest = try NetworkAudioPacket(
+      sessionID: sessionID,
+      sequence: 1,
+      format: format,
+      frameCount: 1,
+      payload: Data(count: 1_143),
+      encoding: .opus,
+      fragment: try NetworkAudioPacketFragment(index: 0, count: 2)
+    )
+    var datagram = try NetworkAudioPacketCodec.encode(honest)
+    datagram[5] = NetworkAudioWireEncoding.interleavedFloat32.rawValue
+    return datagram
+  }
+
   @Test("The ingestor survives hostile datagrams without writing unclaimed frames")
   func ingestorSurvivesHostileDatagrams() throws {
     let format = try NetworkAudioStreamFormat(sampleRate: 48_000, channelCount: 2)
