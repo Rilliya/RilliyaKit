@@ -1,11 +1,12 @@
-// SPDX-License-Identifier: Apache-2.0
-
 import Atomics
 import Darwin
 import Foundation
 import Testing
+import os.lock
 
 @testable import RilliyaRealtime
+
+// SPDX-License-Identifier: Apache-2.0
 
 @Suite("Audio realtime worker")
 struct AudioRealtimeWorkerTests {
@@ -241,6 +242,60 @@ struct AudioRealtimeWorkerTests {
     #expect(outcome.thrown is AudioRealtimeWorkerError)
     #expect(!worker.isRunning)
     worker.stop()
+  }
+
+  /// Two callers stopping at once must both wait for the thread.
+  ///
+  /// The one that lost the race returned immediately, reporting a stopped worker whose body was
+  /// still running — and the body's storage is torn down on that word, so the caller that freed it
+  /// could free it underneath the thread still reading it.
+  ///
+  /// The body is made slow to leave, because the window is otherwise too narrow to observe: what
+  /// is measured is that both calls take as long as the thread takes to finish, not merely that
+  /// they both return.
+  @Test("A second stop waits for the thread rather than returning early")
+  func concurrentStopWaitsForTheThread() throws {
+    let leaving = Duration.milliseconds(400)
+    let worker = AudioRealtimeWorker(
+      label: "moe.uwucocoa.rilliya.test.concurrent-stop",
+      cadence: try Fixture.cadence(),
+      budget: try Fixture.budget(),
+      joinsAudioWorkgroup: false
+    ) { _ in
+      // Slow enough that a caller returning without joining is plainly visible.
+      Thread.sleep(forTimeInterval: 0.4)
+      return .continue
+    }
+
+    try worker.start()
+    Thread.sleep(forTimeInterval: 0.05)
+
+    let elapsed = OSAllocatedUnfairLock<[Duration]>(initialState: [])
+    let finished = DispatchSemaphore(value: 0)
+    let clock = ContinuousClock()
+    for _ in 0..<2 {
+      Thread.detachNewThread {
+        let started = clock.now
+        worker.stop()
+        let took = clock.now - started
+        elapsed.withLock { $0.append(took) }
+        finished.signal()
+      }
+    }
+
+    #expect(finished.wait(timeout: .now() + 10) == .success, "the first stop never returned")
+    #expect(finished.wait(timeout: .now() + 10) == .success, "the second stop never returned")
+
+    let times = elapsed.withLock { $0 }
+    #expect(times.count == 2)
+    // Both waited for the body to leave; the loser of the race did not slip out early.
+    for took in times {
+      #expect(
+        took > leaving / 2,
+        "a stop returned after \(took), before the thread could have finished"
+      )
+    }
+    #expect(!worker.isRunning)
   }
 
   /// Carries what `start()` did off the thread it was called on.

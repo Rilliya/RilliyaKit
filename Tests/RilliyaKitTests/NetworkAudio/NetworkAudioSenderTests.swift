@@ -220,3 +220,70 @@ struct NetworkAudioMeteringTests {
     #expect(Set(snapshot.map(\.channelID.index.rawValue)) == [0, 1])
   }
 }
+
+/// What a sender declares to the realtime scheduler, which has to cover what a cycle actually does.
+@Suite("Network audio sender budget")
+struct NetworkAudioSenderBudgetTests {
+  private static func configuration(
+    encoding: NetworkAudioWireEncoding
+  ) throws -> NetworkAudioSenderConfiguration {
+    try NetworkAudioSenderConfiguration(
+      host: "127.0.0.1",
+      port: 48_995,
+      format: try NetworkAudioStreamFormat(sampleRate: 48_000, channelCount: 2),
+      encoding: encoding
+    )
+  }
+
+  /// A cycle sending one datagram costs one hand-over.
+  @Test("A format that fits a datagram declares one hand-over")
+  func wholeBlockDeclaresOneDatagram() throws {
+    for encoding in [NetworkAudioWireEncoding.interleavedFloat32] {
+      let budget = try Self.configuration(encoding: encoding).realtimeComputationBudget
+
+      #expect(budget == NetworkAudioSenderConfiguration.datagramBudget, "\(encoding)")
+    }
+  }
+
+  /// A lossless block is many datagrams wide.
+  ///
+  /// A cycle hands over every one of them, and declaring the cost of a single datagram for that
+  /// cycle is how a thread is demoted out of the realtime scheduler.
+  /// The comparison is against the format that carries a whole block in one datagram, which is
+  /// the case the single-datagram declaration was written for.
+  @Test("A format wider than a datagram declares what the whole cycle costs")
+  func splitBlockDeclaresEveryPiece() throws {
+    let whole = try Self.configuration(encoding: .interleavedFloat32).realtimeComputationBudget
+    let split = try Self.configuration(encoding: .appleLossless).realtimeComputationBudget
+
+    #expect(whole == NetworkAudioSenderConfiguration.datagramBudget)
+    #expect(split > whole * 5, "a split block declared \(split) against \(whole)")
+    // Measured on this hardware: eighteen pieces of a lossless block spanned 1089 µs at worst,
+    // so a declaration below that makes the overrun the sustained case rather than the tail.
+    #expect(split > Duration.microseconds(1_089))
+  }
+
+  /// A codec whose worst-case packet exceeds one datagram declares more than one hand-over even
+  /// when a typical packet at its bit rate would fit, because the declaration has to cover the
+  /// packet the codec is allowed to produce rather than the one it usually does.
+  @Test("A codec is budgeted for the largest packet it may produce")
+  func codecIsBudgetedForItsWorstCase() throws {
+    let opus = try Self.configuration(encoding: .opus).realtimeComputationBudget
+    let lossless = try Self.configuration(encoding: .appleLossless).realtimeComputationBudget
+
+    #expect(opus > NetworkAudioSenderConfiguration.datagramBudget)
+    #expect(opus < lossless)
+  }
+
+  /// The kernel refuses a computation past its own ceiling, so the declaration stays inside it
+  /// however many pieces a block turns into.
+  @Test("The declaration stays inside what the kernel accepts")
+  func declarationStaysInsideTheKernelsCeiling() throws {
+    for encoding in NetworkAudioWireEncoding.allCases {
+      let budget = try Self.configuration(encoding: encoding).realtimeComputationBudget
+
+      #expect(budget <= AudioRealtimeBudget.maximumComputation, "\(encoding)")
+      #expect(budget >= NetworkAudioSenderConfiguration.datagramBudget, "\(encoding)")
+    }
+  }
+}

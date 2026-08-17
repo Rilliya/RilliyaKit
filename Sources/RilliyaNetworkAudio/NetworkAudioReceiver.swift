@@ -198,6 +198,9 @@ public final class NetworkAudioReceiver: @unchecked Sendable {
     ingestor.meter.snapshot()
   }
 
+  /// How many connections this receiver is holding, which a stopped one holds none of.
+  var trackedConnectionCount: Int { lock.withLock { connections.count } }
+
   /// The paced view of ``frameBuffer`` a prepared graph reads.
   ///
   /// Reading the queue directly drains it to empty, which turns every late packet into a gap and
@@ -305,7 +308,7 @@ public final class NetworkAudioReceiver: @unchecked Sendable {
     ingestor.statistics()
   }
 
-  private func accept(_ connection: NWConnection) {
+  func accept(_ connection: NWConnection) {
     // A connection handler already queued when `stop()` ran would otherwise start a connection the
     // stopped receiver goes on reading audio from, and which nothing cancels until it is released.
     let shouldAccept = lock.withLock { () -> Bool in
