@@ -442,7 +442,7 @@ struct NetworkAudioEncryptedIngestTests {
         format: AudioProcessingFormat(sampleRate: 48_000, channelCount: Fixture.channelCount),
         capacityFrameCount: 32_768
       )
-      ingestor = NetworkAudioPacketIngestor(
+      ingestor = try NetworkAudioPacketIngestor(
         configuration: try NetworkAudioReceiverConfiguration(
           port: Fixture.port,
           format: format,

@@ -6,6 +6,9 @@ import RilliyaRealtime
 
 /// Bounded controls for one direct UDP network-audio receiver.
 public struct NetworkAudioReceiverConfiguration: Equatable, Hashable, Sendable {
+  /// The deepest reorder window, past which holding costs more delay than a tunnel ever saves.
+  public static let maximumReorderDepth = 64
+
   /// The local UDP port.
   public let port: UInt16
 
@@ -24,6 +27,13 @@ public struct NetworkAudioReceiverConfiguration: Equatable, Hashable, Sendable {
   /// How much audio the receiver holds before a render callback may read it.
   public let jitter: AudioJitterBufferConfiguration
 
+  /// How many packets may be held while waiting for one that arrived out of order.
+  ///
+  /// A wired local network barely reorders, and a tunnel does. Holding costs nothing while the
+  /// order is right; a packet that is genuinely lost delays the stream by at most this many
+  /// packets before the gap is conceded. `1` holds nothing.
+  public let reorderDepth: Int
+
   /// The key both peers share, or `nil` to accept audio in the clear.
   ///
   /// A configured key also rejects unencrypted datagrams, so reaching the port is not enough to
@@ -39,6 +49,7 @@ public struct NetworkAudioReceiverConfiguration: Equatable, Hashable, Sendable {
       .defaultMaximumDatagramByteCount,
     sessionTakeoverInterval: Duration = .seconds(1),
     jitter: AudioJitterBufferConfiguration = .localNetwork,
+    reorderDepth: Int = 8,
     sharedKey: NetworkAudioSharedKey? = nil
   ) throws {
     guard port > 0 else { throw NetworkAudioReceiverError.invalidPort }
@@ -59,12 +70,16 @@ public struct NetworkAudioReceiverConfiguration: Equatable, Hashable, Sendable {
     guard sessionTakeoverInterval >= .zero, sessionTakeoverInterval <= .seconds(60) else {
       throw NetworkAudioReceiverError.invalidTakeoverInterval
     }
+    guard (1...Self.maximumReorderDepth).contains(reorderDepth) else {
+      throw NetworkAudioReceiverError.invalidReorderDepth
+    }
     self.port = port
     self.format = format
     self.capacityFrameCount = capacityFrameCount
     self.maximumDatagramByteCount = maximumDatagramByteCount
     self.sessionTakeoverInterval = sessionTakeoverInterval
     self.jitter = jitter
+    self.reorderDepth = reorderDepth
     self.sharedKey = sharedKey
   }
 }
@@ -83,6 +98,9 @@ public enum NetworkAudioReceiverError: Error, Equatable, LocalizedError, Sendabl
   /// The sender takeover interval is outside the bounded policy.
   case invalidTakeoverInterval
 
+  /// The reorder window is outside the bounded policy.
+  case invalidReorderDepth
+
   /// A stopped receiver cannot be started again.
   case alreadyStopped
 
@@ -100,6 +118,8 @@ public enum NetworkAudioReceiverError: Error, Equatable, LocalizedError, Sendabl
       "The network audio receiver buffer capacity must be between 2 and 65,536 frames."
     case .invalidTakeoverInterval:
       "The network audio session takeover interval must be between zero and 60 seconds."
+    case .invalidReorderDepth:
+      "The network audio reorder window must be between 1 and 64 packets."
     case .alreadyStopped:
       "A stopped network audio receiver cannot be restarted."
     case .transport(let failure):
@@ -185,7 +205,7 @@ public final class NetworkAudioReceiver: @unchecked Sendable {
       frameBuffer: frameBuffer,
       configuration: configuration.jitter
     )
-    ingestor = NetworkAudioPacketIngestor(
+    ingestor = try NetworkAudioPacketIngestor(
       configuration: configuration,
       frameBuffer: frameBuffer
     )
@@ -294,20 +314,25 @@ final class NetworkAudioPacketIngestor {
   private var activeSessionID: UUID?
   private var cipherSessionID: UUID?
   private var cipher: NetworkAudioSessionCipher?
-  private var lastSequence: UInt64?
+  private let reorderBuffer: NetworkAudioPacketReorderBuffer
   private var lastFrameCount = 0
   private var lastAcceptedTime: UInt64 = 0
 
   init(
     configuration: NetworkAudioReceiverConfiguration,
     frameBuffer: AudioRealtimeFrameBuffer
-  ) {
+  ) throws {
     self.configuration = configuration
     self.frameBuffer = frameBuffer
     maximumFrameCount =
       (configuration.maximumDatagramByteCount - NetworkAudioPacketCodec.headerByteCount)
       / configuration.format.channelCount / MemoryLayout<Float>.stride
     let sampleCapacity = maximumFrameCount * configuration.format.channelCount
+    reorderBuffer = try NetworkAudioPacketReorderBuffer(
+      depth: configuration.reorderDepth,
+      maximumFrameCount: maximumFrameCount,
+      channelCount: configuration.format.channelCount
+    )
     interleavedStorage = .allocate(capacity: sampleCapacity)
     silenceStorage = .allocate(capacity: sampleCapacity)
     silenceStorage.initialize(repeating: 0, count: sampleCapacity)
@@ -352,25 +377,34 @@ final class NetworkAudioPacketIngestor {
       resetSession(to: packet.sessionID)
     }
 
-    if let lastSequence {
-      guard packet.sequence > lastSequence else {
-        increment(\Self.stalePacketCount)
-        return .stale
-      }
-      let missing = packet.sequence - lastSequence - 1
-      if missing > 0 {
-        add(missing, to: \Self.missingPacketCount)
-        writeMissingSilence(packetCount: missing)
+    decodePayload(packet.payload)
+    var missing: UInt64 = 0
+    let admission = reorderBuffer.admit(
+      sequence: packet.sequence,
+      samples: interleavedStorage,
+      frameCount: packet.frameCount
+    ) { [frameBuffer, configuration] samples, frameCount in
+      guard frameCount > 0 else { return }
+      if let samples {
+        _ = frameBuffer.writeInterleaved(
+          samples,
+          channelCount: configuration.format.channelCount,
+          frameCount: frameCount
+        )
+      } else {
+        missing &+= 1
+        _ = frameBuffer.writeInterleaved(
+          self.silenceStorage,
+          channelCount: configuration.format.channelCount,
+          frameCount: frameCount
+        )
       }
     }
-
-    decodePayload(packet.payload)
-    _ = frameBuffer.writeInterleaved(
-      interleavedStorage,
-      channelCount: configuration.format.channelCount,
-      frameCount: packet.frameCount
-    )
-    lastSequence = packet.sequence
+    if missing > 0 { add(missing, to: \Self.missingPacketCount) }
+    guard admission == .queued else {
+      increment(\Self.stalePacketCount)
+      return .stale
+    }
     lastFrameCount = packet.frameCount
     lastAcceptedTime = now
     increment(\Self.acceptedPacketCount)
@@ -404,26 +438,11 @@ final class NetworkAudioPacketIngestor {
     return cipher
   }
 
+  /// Drops whatever the previous session left held rather than placing it in the new one.
   private func resetSession(to sessionID: UUID) {
     activeSessionID = sessionID
-    lastSequence = nil
+    reorderBuffer.reset()
     lastFrameCount = 0
-  }
-
-  private func writeMissingSilence(packetCount: UInt64) {
-    guard lastFrameCount > 0 else { return }
-    let multiplication = packetCount.multipliedReportingOverflow(by: UInt64(lastFrameCount))
-    let requested = multiplication.overflow ? UInt64.max : multiplication.partialValue
-    var remaining = min(requested, UInt64(frameBuffer.capacityFrameCount))
-    while remaining > 0 {
-      let frameCount = min(Int(remaining), maximumFrameCount)
-      _ = frameBuffer.writeInterleaved(
-        silenceStorage,
-        channelCount: configuration.format.channelCount,
-        frameCount: frameCount
-      )
-      remaining -= UInt64(frameCount)
-    }
   }
 
   private func decodePayload(_ payload: Data) {

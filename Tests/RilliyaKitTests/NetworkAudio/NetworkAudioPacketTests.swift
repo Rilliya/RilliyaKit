@@ -69,13 +69,15 @@ struct NetworkAudioPacketTests {
       port: 48_620,
       format: format,
       capacityFrameCount: 32,
-      sessionTakeoverInterval: .seconds(1)
+      sessionTakeoverInterval: .seconds(1),
+      // Holding nothing, so a gap is conceded the moment a later packet arrives.
+      reorderDepth: 1
     )
     let buffer = try AudioRealtimeFrameBuffer(
       format: AudioProcessingFormat(sampleRate: 48_000, channelCount: 1),
       capacityFrameCount: 32
     )
-    let ingestor = NetworkAudioPacketIngestor(
+    let ingestor = try NetworkAudioPacketIngestor(
       configuration: configuration,
       frameBuffer: buffer
     )

@@ -101,7 +101,7 @@ struct NetworkAudioPacketFuzzTests {
     let frameBuffer = try AudioRealtimeFrameBuffer(
       format: AudioProcessingFormat(sampleRate: 48_000, channelCount: 2)
     )
-    let ingestor = NetworkAudioPacketIngestor(
+    let ingestor = try NetworkAudioPacketIngestor(
       configuration: try NetworkAudioReceiverConfiguration(port: 48_620, format: format),
       frameBuffer: frameBuffer
     )
