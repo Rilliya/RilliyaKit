@@ -134,7 +134,18 @@ private final class DiscoverySession: @unchecked Sendable {
           guard case .failed(let error) = state else { return }
           self?.finish(.failure(NetworkAudioFormatDiscoveryError.transport(.init(error))))
         }
-        lock.withLock { self.listener = listener }
+        // Published and started only if nothing closed the session while it was being built.
+        // `close()` cancels what it can see, and until this runs it can see nothing — so a
+        // listener started regardless would hold its port with nobody left to release it.
+        let shouldListen = lock.withLock { () -> Bool in
+          guard !isFinished else { return false }
+          self.listener = listener
+          return true
+        }
+        guard shouldListen else {
+          listener.cancel()
+          return
+        }
         listener.start(queue: queue)
       } catch let error as NWError {
         finish(.failure(NetworkAudioFormatDiscoveryError.transport(.init(error))))
@@ -158,7 +169,15 @@ private final class DiscoverySession: @unchecked Sendable {
   }
 
   private func accept(_ connection: NWConnection) {
-    lock.withLock { connections[ObjectIdentifier(connection)] = connection }
+    let shouldAccept = lock.withLock { () -> Bool in
+      guard !isFinished else { return false }
+      connections[ObjectIdentifier(connection)] = connection
+      return true
+    }
+    guard shouldAccept else {
+      connection.cancel()
+      return
+    }
     connection.start(queue: queue)
     receiveNext(on: connection)
   }
