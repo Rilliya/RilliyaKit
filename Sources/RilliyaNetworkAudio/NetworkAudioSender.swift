@@ -382,7 +382,7 @@ public final class NetworkAudioSender: @unchecked Sendable {
         sampleRate: configuration.format.sampleRate
       ),
       budget: try AudioRealtimeBudget.matching(
-        computation: NetworkAudioSenderPacketizer.computationBudget
+        computation: NetworkAudioSenderPacketizer.computationBudget(for: configuration)
       )
     ) { _ in
       packets.emit(through: connection)
@@ -439,11 +439,43 @@ public final class NetworkAudioSender: @unchecked Sendable {
 /// Every buffer is allocated during initialization, the encoder writes in place, and the send is
 /// fire and forget, so this can run on the sender's realtime thread.
 private final class NetworkAudioSenderPacketizer: @unchecked Sendable {
-  /// The time one packet is allowed to take.
+  /// The time handing one datagram to Network.framework is allowed to take.
   ///
-  /// Handing a datagram to Network.framework measured p50 12 µs and worst case 567 µs on this
-  /// hardware, so the budget covers the tail rather than the median.
-  static let computationBudget = Duration.microseconds(700)
+  /// Measured p50 12 µs and worst case 567 µs on this hardware, so this covers the tail rather
+  /// than the median.
+  static let datagramBudget = Duration.microseconds(700)
+
+  /// What a further datagram in the same cycle is allowed to take.
+  ///
+  /// The tail above is a cold hand-over; the ones behind it in a burst measured far cheaper —
+  /// eighteen pieces of a lossless block spanned 166 µs at the median and 1089 µs at worst.
+  static let additionalDatagramBudget = Duration.microseconds(100)
+
+  /// The time one cycle is allowed to take.
+  ///
+  /// A whole block fits one datagram unless the codec's block is wider than one, and then a cycle
+  /// hands over every piece the block was split into. Declaring the cost of a single datagram for
+  /// a cycle that sends thirty of them is how a realtime thread earns its way out of the realtime
+  /// scheduler.
+  static func computationBudget(
+    for configuration: NetworkAudioSenderConfiguration
+  ) -> Duration {
+    guard let codec = NetworkAudioCodec.codec(for: configuration.encoding) else {
+      return datagramBudget
+    }
+    let block = codec.maximumPacketByteCount(
+      sampleRate: configuration.format.sampleRate,
+      channelCount: configuration.format.channelCount
+    )
+    let room =
+      configuration.maximumCompressedPacketByteCount
+      - NetworkAudioPacketFragment.headerByteCount
+      - NetworkAudioCodec.maximumConfigurationByteCount
+    guard room >= 1 else { return datagramBudget }
+    let pieces = min(max((block + room - 1) / room, 1), NetworkAudioPacketFragment.maximumCount)
+    let wanted = datagramBudget + additionalDatagramBudget * (pieces - 1)
+    return min(wanted, AudioRealtimeBudget.maximumComputation)
+  }
 
   private let configuration: NetworkAudioSenderConfiguration
   /// The identity this run seals and stamps its packets with.
