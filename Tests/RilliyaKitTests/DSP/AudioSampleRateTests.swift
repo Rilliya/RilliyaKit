@@ -255,3 +255,154 @@ struct AudioSampleRateConverterTests {
     }
   }
 }
+
+/// The graph carries one buffer per channel, so the converter has to work in that layout without
+/// weaving the channels together and apart again on every block.
+@Suite("Audio sample rate converter, planar")
+struct AudioSampleRatePlanarConverterTests {
+  private enum Fixture {
+    static let channelCount = 2
+    static let outputFrameCount = 512
+    static let frequency = 440.0
+  }
+
+  @Test(
+    "A planar block is produced at the output rate",
+    arguments: [(44_100.0, 48_000.0), (48_000.0, 96_000.0), (96_000.0, 48_000.0)]
+  )
+  func producesAFullBlock(input: Double, output: Double) throws {
+    let harness = try Harness(input: input, output: output)
+
+    #expect(try harness.convert() == Fixture.outputFrameCount)
+  }
+
+  /// Each channel must come out as itself: a converter that shared state across channels would
+  /// smear one into another, which no level check on a single channel would notice.
+  @Test("Every channel keeps its own signal")
+  func channelsStayApart() throws {
+    let harness = try Harness(input: 44_100, output: 48_000, distinctChannels: true)
+
+    _ = try harness.convert()
+
+    let first = harness.rendered(channel: 0).suffix(Fixture.outputFrameCount / 2)
+    let second = harness.rendered(channel: 1).suffix(Fixture.outputFrameCount / 2)
+    // The second channel was supplied at half amplitude and must still be at half.
+    let ratio = harness.level(Array(second)) / harness.level(Array(first))
+    #expect(ratio > 0.45)
+    #expect(ratio < 0.55)
+  }
+
+  @Test("The same rate in and out passes each channel through")
+  func identityConversionIsTransparent() throws {
+    let harness = try Harness(input: 48_000, output: 48_000, distinctChannels: true)
+
+    _ = try harness.convert()
+
+    for channel in 0..<Fixture.channelCount {
+      let source = harness.source(channel: channel)
+      let rendered = harness.rendered(channel: channel)
+      for frame in 0..<Fixture.outputFrameCount {
+        #expect(abs(rendered[frame] - source[frame]) < 1e-4)
+      }
+    }
+  }
+
+  @Test("An interleaved converter refuses planar buffers rather than reading them wrongly")
+  func layoutIsEnforced() throws {
+    let converter = try AudioSampleRateConverter(
+      inputSampleRate: 44_100,
+      outputSampleRate: 48_000,
+      channelCount: Fixture.channelCount,
+      maximumOutputFrameCount: Fixture.outputFrameCount,
+      layout: .interleaved
+    )
+    let harness = try Harness(input: 44_100, output: 48_000)
+
+    #expect(throws: AudioSampleRateConverterError.self) {
+      _ = try harness.withBuffers { input, output in
+        try converter.convert(
+          input: input,
+          inputFrameCount: 128,
+          output: output,
+          outputFrameCount: Fixture.outputFrameCount
+        )
+      }
+    }
+  }
+
+  private final class Harness {
+    let converter: AudioSampleRateConverter
+    private let inputChannels: [UnsafeMutablePointer<Float>]
+    private let outputChannels: [UnsafeMutablePointer<Float>]
+    private let inputCapacity: Int
+
+    init(input: Double, output: Double, distinctChannels: Bool = false) throws {
+      converter = try AudioSampleRateConverter(
+        inputSampleRate: input,
+        outputSampleRate: output,
+        channelCount: Fixture.channelCount,
+        maximumOutputFrameCount: Fixture.outputFrameCount,
+        layout: .planar
+      )
+      let capacity = converter.maximumInputFrameCount
+      inputCapacity = capacity
+      inputChannels = (0..<Fixture.channelCount).map { channel in
+        let buffer = UnsafeMutablePointer<Float>.allocate(capacity: capacity)
+        let scale: Double = distinctChannels && channel == 1 ? 0.5 : 1
+        for frame in 0..<capacity {
+          buffer[frame] = Float(
+            0.3 * scale * sin(2 * .pi * Fixture.frequency * Double(frame) / input)
+          )
+        }
+        return buffer
+      }
+      outputChannels = (0..<Fixture.channelCount).map { _ in
+        let buffer = UnsafeMutablePointer<Float>.allocate(capacity: Fixture.outputFrameCount)
+        buffer.initialize(repeating: 0, count: Fixture.outputFrameCount)
+        return buffer
+      }
+    }
+
+    deinit {
+      for buffer in inputChannels + outputChannels { buffer.deallocate() }
+    }
+
+    func withBuffers<T>(
+      _ body: (
+        UnsafeBufferPointer<UnsafePointer<Float>>,
+        UnsafeBufferPointer<UnsafeMutablePointer<Float>>
+      ) throws -> T
+    ) rethrows -> T {
+      let readOnly = inputChannels.map { UnsafePointer<Float>($0) }
+      return try readOnly.withUnsafeBufferPointer { input in
+        try outputChannels.withUnsafeBufferPointer { output in
+          try body(input, output)
+        }
+      }
+    }
+
+    func convert() throws -> Int {
+      try withBuffers { input, output in
+        try converter.convert(
+          input: input,
+          inputFrameCount: inputCapacity,
+          output: output,
+          outputFrameCount: Fixture.outputFrameCount
+        )
+      }
+    }
+
+    func rendered(channel: Int) -> [Float] {
+      Array(UnsafeBufferPointer(start: outputChannels[channel], count: Fixture.outputFrameCount))
+    }
+
+    func source(channel: Int) -> [Float] {
+      Array(UnsafeBufferPointer(start: inputChannels[channel], count: Fixture.outputFrameCount))
+    }
+
+    func level(_ samples: [Float]) -> Float {
+      guard !samples.isEmpty else { return 0 }
+      return (samples.reduce(Float(0)) { $0 + $1 * $1 } / Float(samples.count)).squareRoot()
+    }
+  }
+}
