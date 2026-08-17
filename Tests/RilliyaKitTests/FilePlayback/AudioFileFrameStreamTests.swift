@@ -28,13 +28,14 @@ struct AudioFileFrameStreamTests {
     ) { event in
       events.continuation.yield(event)
     }
+    let destination = try source.subscribe()
     source.start()
     let event = await events.stream.first { _ in true }
     #expect(event == .completed)
 
-    let rendered = read(source.frameBuffer, frameCount: 4)
+    let rendered = read(destination, frameCount: 4)
     #expect(rendered == [0.25, -0.5, 0.75, -1])
-    #expect(source.frameBuffer.statistics().droppedFrameCount == 0)
+    #expect(destination.statistics().frameBuffer.droppedFrameCount == 0)
     await source.stop()
   }
 
@@ -64,6 +65,7 @@ struct AudioFileFrameStreamTests {
 
     #expect(source.meterSnapshot().isEmpty, "nothing has been decoded yet")
 
+    let destination = try source.subscribe()
     source.start()
     _ = await events.stream.first { _ in true }
 
@@ -91,11 +93,12 @@ struct AudioFileFrameStreamTests {
     ) { event in
       events.continuation.yield(event)
     }
+    let destination = try source.subscribe()
     source.start()
     let event = await events.stream.first { _ in true }
     #expect(event == .completed)
 
-    #expect(read(source.frameBuffer, frameCount: 4) == [0.25, -0.25, 0.25, -0.25])
+    #expect(read(destination, frameCount: 4) == [0.25, -0.25, 0.25, -0.25])
     await source.stop()
   }
 
@@ -174,7 +177,107 @@ private enum TestFixtureError: Error {
   case writeFailed(OSStatus)
 }
 
-private func read(_ buffer: AudioRealtimeFrameBuffer, frameCount: Int) -> [Float] {
+/// One file reaching several destinations at once.
+///
+/// A file owes every destination the same fixed sequence, which is what separates it from a live
+/// source: a destination that falls behind is owed audio, not late, so nothing may be dropped to
+/// catch it up. The file advances at the pace of whichever destination is furthest behind.
+@Suite("Audio file fan-out")
+struct AudioFileFanOutTests {
+  private static func stream(
+    samples: [Float],
+    capacityFrameCount: Int = 8,
+    chunkFrameCount: Int = 4
+  ) throws -> (file: TemporaryPCMFile, source: AudioFileFrameStream) {
+    let fixture = try TemporaryPCMFile(samples: samples)
+    return (
+      fixture,
+      try AudioFileFrameStream(
+        url: fixture.url,
+        configuration: AudioFileFrameStreamConfiguration(
+          sampleRate: 48_000,
+          capacityFrameCount: capacityFrameCount,
+          chunkFrameCount: chunkFrameCount
+        )
+      ) { _ in }
+    )
+  }
+
+  @Test("Two destinations each receive the whole file")
+  func twoDestinationsEachReceiveEverything() async throws {
+    let samples: [Float] = [0.25, -0.5, 0.75, -1]
+    let (fixture, source) = try Self.stream(samples: samples)
+    defer { _ = fixture }
+    let first = try source.subscribe()
+    let second = try source.subscribe()
+    source.start()
+    defer { Task { await source.stop() } }
+
+    #expect(await Self.settles { first.statistics().frameBuffer.availableFrameCount >= 4 })
+    #expect(await Self.settles { second.statistics().frameBuffer.availableFrameCount >= 4 })
+    // Read the second first: sharing one queue would leave whichever read later with nothing.
+    #expect(read(second, frameCount: 4) == samples)
+    #expect(read(first, frameCount: 4) == samples)
+  }
+
+  /// The property that separates a file from a live source: nothing is dropped to catch anyone up.
+  @Test("A destination that never reads holds the file rather than losing its audio")
+  func aSlowDestinationIsWaitedFor() async throws {
+    // Longer than one queue, so the file can only finish if the reader is actually waited for.
+    let samples = (0..<64).map { Float($0 % 8) / 8 - 0.5 }
+    let (fixture, source) = try Self.stream(samples: samples, capacityFrameCount: 8)
+    defer { _ = fixture }
+    let attentive = try source.subscribe()
+    let stalled = try source.subscribe()
+    source.start()
+    defer { Task { await source.stop() } }
+
+    // A read of an empty queue is zero-filled, so only take what has actually arrived.
+    var received: [Float] = []
+    for _ in 0..<200 where received.count < samples.count {
+      if attentive.statistics().frameBuffer.availableFrameCount >= 4 {
+        received += read(attentive, frameCount: 4)
+      } else {
+        try await Task.sleep(for: .milliseconds(5))
+      }
+    }
+
+    // The stalled destination never read, so its queue is full and stayed full.
+    #expect(stalled.statistics().frameBuffer.availableFrameCount > 0)
+    #expect(
+      stalled.statistics().frameBuffer.droppedFrameCount == 0,
+      "a file destination lost audio")
+    #expect(
+      Array(received.prefix(8)) == Array(samples.prefix(8)),
+      "the attentive destination did not receive the file in order")
+  }
+
+  /// A file decoded into queues nobody holds is audio read and thrown away.
+  @Test("A file with no destination does not advance")
+  func aFileWithNoDestinationDoesNotAdvance() async throws {
+    let (fixture, source) = try Self.stream(samples: [0.25, -0.5, 0.75, -1])
+    defer { _ = fixture }
+    source.start()
+    defer { Task { await source.stop() } }
+    try await Task.sleep(for: .milliseconds(60))
+
+    let destination = try source.subscribe()
+    #expect(await Self.settles { destination.statistics().frameBuffer.availableFrameCount >= 4 })
+    #expect(
+      read(destination, frameCount: 4) == [0.25, -0.5, 0.75, -1],
+      "a destination that arrived late missed the start of the file")
+  }
+
+  private static func settles(_ predicate: () -> Bool) async -> Bool {
+    for _ in 0..<200 {
+      if predicate() { return true }
+      try? await Task.sleep(for: .milliseconds(5))
+    }
+    return false
+  }
+}
+
+private func read(_ destination: AudioRealtimeFrameSubscription, frameCount: Int) -> [Float] {
   let storage = UnsafeMutablePointer<Float>.allocate(capacity: frameCount)
   storage.initialize(repeating: .nan, count: frameCount)
   defer {
@@ -183,7 +286,7 @@ private func read(_ buffer: AudioRealtimeFrameBuffer, frameCount: Int) -> [Float
   }
   let channels = [storage]
   channels.withUnsafeBufferPointer {
-    _ = buffer.read(into: $0, frameCount: frameCount)
+    _ = destination.read(into: $0, frameCount: frameCount)
   }
   return Array(UnsafeBufferPointer(start: storage, count: frameCount))
 }

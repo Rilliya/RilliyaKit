@@ -55,8 +55,14 @@ public struct AudioFileFrameStreamConfiguration: Equatable, Hashable, Sendable {
   /// The number of complete file passes.
   public let loopMode: AudioFileLoopMode
 
-  /// The fixed PCM queue capacity shared with one realtime consumer.
+  /// The fixed PCM queue capacity prepared for each destination.
   public let capacityFrameCount: Int
+
+  /// How many destinations may read this file at once, each on its own clock.
+  public let maximumDestinationCount: Int
+
+  /// The destinations a file is given room for when the caller does not say.
+  public static let preferredDestinationCount = 8
 
   /// The largest file read performed by the background producer.
   public let chunkFrameCount: Int
@@ -72,7 +78,8 @@ public struct AudioFileFrameStreamConfiguration: Equatable, Hashable, Sendable {
     loopMode: AudioFileLoopMode = .once,
     capacityFrameCount: Int = 16_384,
     chunkFrameCount: Int = 1_024,
-    waveformUpdatesPerSecond: Int = AudioWaveformMeter.defaultUpdatesPerSecond
+    waveformUpdatesPerSecond: Int = AudioWaveformMeter.defaultUpdatesPerSecond,
+    maximumDestinationCount: Int? = nil
   ) throws {
     guard sampleRate.isFinite, sampleRate > 0 else {
       throw AudioFileFrameStreamError.invalidSampleRate(sampleRate)
@@ -91,6 +98,7 @@ public struct AudioFileFrameStreamConfiguration: Equatable, Hashable, Sendable {
     self.sampleRate = sampleRate
     self.loopMode = loopMode
     self.capacityFrameCount = capacityFrameCount
+    self.maximumDestinationCount = maximumDestinationCount ?? Self.preferredDestinationCount
     self.chunkFrameCount = chunkFrameCount
     self.waveformUpdatesPerSecond = waveformUpdatesPerSecond
   }
@@ -171,8 +179,8 @@ public enum AudioFileFrameStreamEvent: Equatable, Sendable {
 /// Streams a supported local audio file into one bounded realtime PCM buffer.
 ///
 /// File IO, decoding, sample-rate conversion, and loop seeking run on a background task. The
-/// realtime consumer only reads ``frameBuffer``. One stream supports one consumer and never loads
-/// the complete file into memory.
+/// realtime consumer only reads the queue it claimed. One stream serves several destinations and
+/// never loads the complete file into memory.
 public final class AudioFileFrameStream: @unchecked Sendable {
   /// Receives completion or failure away from the realtime thread.
   public typealias EventHandler = @Sendable (AudioFileFrameStreamEvent) -> Void
@@ -180,13 +188,25 @@ public final class AudioFileFrameStream: @unchecked Sendable {
   /// Source metadata discovered during initialization.
   public let sourceDescription: AudioFileDescription
 
-  /// The decoded noninterleaved Float32 queue consumed by a realtime graph.
-  public let frameBuffer: AudioRealtimeFrameBuffer
+  /// The decoded audio every destination is served from.
+  ///
+  /// A file source owes each destination the same fixed sequence, so each gets a queue of its own
+  /// and the reader advances no faster than the fullest of them: writing past that would not slow
+  /// a destination down, it would drop what did not fit, which here is audio skipped.
+  public let distributor: AudioRealtimeFrameDistributor
+
+  /// Claims one destination's queue.
+  ///
+  /// Reading a destination's queue is what lets the file advance, so a claimed destination that is
+  /// never read holds playback for every other. Releasing the subscription gives its slot back.
+  public func subscribe() throws -> AudioRealtimeFrameSubscription {
+    try distributor.subscribe()
+  }
 
   /// What the file currently sounds like, one entry per channel.
   ///
-  /// Reading ``frameBuffer`` would take the audio away from whatever is playing it, so anything
-  /// that wants to draw the file reads this instead.
+  /// Reading a destination's queue would take the audio away from whatever is playing it, so
+  /// anything that wants to draw the file reads this instead.
   public func meterSnapshot() -> [AudioChannelMeterSnapshot] { meter.snapshot() }
 
   /// Called whenever there is a new waveform to draw, on the thread that decoded it.
@@ -227,12 +247,22 @@ public final class AudioFileFrameStream: @unchecked Sendable {
     self.url = url
     self.configuration = configuration
     self.eventHandler = eventHandler
-    frameBuffer = try AudioRealtimeFrameBuffer(
+    // Every destination is preallocated, so a wide file affords fewer of them. Playing to one
+    // place is worth more than refusing the file outright, so the count comes down to what the
+    // file's own width leaves room for.
+    let affordableDestinationCount =
+      AudioRealtimeFrameDistributor.maximumAggregateSampleCapacity
+      / max(1, sourceDescription.channelCount * configuration.capacityFrameCount)
+    distributor = try AudioRealtimeFrameDistributor(
       format: AudioProcessingFormat(
         sampleRate: configuration.sampleRate,
         channelCount: sourceDescription.channelCount
       ),
-      capacityFrameCount: configuration.capacityFrameCount
+      capacityFrameCount: configuration.capacityFrameCount,
+      maximumSubscriberCount: max(
+        1,
+        min(configuration.maximumDestinationCount, affordableDestinationCount)
+      )
     )
     let streamID = self.streamID
     meter = AudioWaveformMeter(
@@ -260,7 +290,7 @@ public final class AudioFileFrameStream: @unchecked Sendable {
       let url = url
       let configuration = configuration
       let channelCount = sourceDescription.channelCount
-      let frameBuffer = frameBuffer
+      let distributor = distributor
       let meter = meter
       let eventHandler = eventHandler
       task = Task.detached(priority: .userInitiated) {
@@ -269,7 +299,7 @@ public final class AudioFileFrameStream: @unchecked Sendable {
             url: url,
             configuration: configuration,
             channelCount: channelCount,
-            frameBuffer: frameBuffer,
+            distributor: distributor,
             meter: meter
           )
           if !Task.isCancelled {
@@ -337,7 +367,7 @@ public final class AudioFileFrameStream: @unchecked Sendable {
     url: URL,
     configuration: AudioFileFrameStreamConfiguration,
     channelCount: Int,
-    frameBuffer: AudioRealtimeFrameBuffer,
+    distributor: AudioRealtimeFrameDistributor,
     meter: AudioWaveformMeter
   ) async throws {
     var file: ExtAudioFileRef?
@@ -374,8 +404,13 @@ public final class AudioFileFrameStream: @unchecked Sendable {
     )
     var completedPassCount = 0
     while !Task.isCancelled {
-      let available = frameBuffer.statistics().availableFrameCount
-      let writable = frameBuffer.capacityFrameCount - available
+      // Paced by the fullest destination, and by nothing at all while none is reading: a file
+      // read into queues nobody holds is audio decoded and then thrown away.
+      guard let fullest = distributor.maximumAvailableFrameCount else {
+        try await Task.sleep(for: .milliseconds(2))
+        continue
+      }
+      let writable = distributor.capacityFrameCount - fullest
       if writable == 0 {
         try await Task.sleep(for: .milliseconds(2))
         continue
@@ -392,7 +427,7 @@ public final class AudioFileFrameStream: @unchecked Sendable {
       }
       if requestedFrameCount > 0 {
         storage.withChannelPointers { pointers in
-          _ = frameBuffer.writePlanar(pointers, frameCount: Int(requestedFrameCount))
+          _ = distributor.writePlanar(pointers, frameCount: Int(requestedFrameCount))
           meter.submit(planar: pointers, frameCount: Int(requestedFrameCount))
         }
         continue

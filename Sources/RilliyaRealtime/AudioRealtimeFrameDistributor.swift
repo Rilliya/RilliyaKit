@@ -144,6 +144,15 @@ public final class AudioRealtimeFrameDistributor: @unchecked Sendable {
     slots.lazy.filter(\.isClaimed).map(\.availableFrameCount).min()
   }
 
+  /// The frames queued for whichever reader has most, or `nil` when nothing is reading.
+  ///
+  /// What a producer that owes every reader the same audio asks before writing. Writing past the
+  /// fullest queue would not slow that reader down; it would drop what did not fit, which for a
+  /// source with a fixed sequence is audio skipped rather than latency avoided.
+  public var maximumAvailableFrameCount: Int? {
+    slots.lazy.filter(\.isClaimed).map(\.availableFrameCount).max()
+  }
+
   /// Claims one independently paced subscriber queue.
   ///
   /// Subscription management may lock and must not run on an audio callback. Cancelling a
