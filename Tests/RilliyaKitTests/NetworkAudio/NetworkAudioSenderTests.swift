@@ -219,6 +219,66 @@ struct NetworkAudioMeteringTests {
     // The channels are named apart, which is what lets each be drawn on its own.
     #expect(Set(snapshot.map(\.channelID.index.rawValue)) == [0, 1])
   }
+
+  /// How often the meter has something new to say, which is the ceiling on how often anything
+  /// drawing it can move.
+  @Test("A receiver reports a new waveform many times a second")
+  func meterPublishesOftenEnoughToDraw() async throws {
+    let format = try NetworkAudioStreamFormat(sampleRate: 48_000, channelCount: 2)
+    let receiver = try NetworkAudioReceiver(
+      configuration: try NetworkAudioReceiverConfiguration(port: 48_997, format: format)
+    )
+    let sender = try NetworkAudioSender(
+      configuration: try NetworkAudioSenderConfiguration(
+        host: "127.0.0.1", port: 48_997, format: format, framesPerPacket: 128)
+    )
+    try receiver.start()
+    try sender.start()
+
+    let feeding = Task {
+      let quantum = 128
+      var left = [Float](repeating: 0, count: quantum)
+      var right = [Float](repeating: 0, count: quantum)
+      var phase = 0.0
+      for _ in 0..<800 {
+        for frame in 0..<quantum {
+          left[frame] = Float(0.25 * sin(phase))
+          right[frame] = Float(0.25 * sin(phase * 3))
+          phase += 2 * .pi * 440 / 48_000
+        }
+        left.withUnsafeBufferPointer { l in
+          right.withUnsafeBufferPointer { r in
+            guard let lb = l.baseAddress, let rb = r.baseAddress else { return }
+            [lb, rb].withUnsafeBufferPointer { channels in
+              _ = sender.frameBuffer.writePlanar(channels, frameCount: quantum)
+            }
+          }
+        }
+        try? await Task.sleep(for: .microseconds(2_666))
+      }
+    }
+
+    // Sample far faster than the meter publishes, and count how often what it says changes.
+    try await Task.sleep(for: .milliseconds(300))
+    var distinct = 0
+    var previous: [Float] = []
+    let started = ContinuousClock().now
+    while ContinuousClock().now - started < .seconds(1) {
+      let waveform = receiver.meterSnapshot().first?.waveform ?? []
+      if !waveform.isEmpty, waveform != previous {
+        distinct += 1
+        previous = waveform
+      }
+      try? await Task.sleep(for: .milliseconds(2))
+    }
+    feeding.cancel()
+    await sender.stop()
+    receiver.stop()
+
+    // Fifty milliseconds of audio per report is twenty a second; anything near one a second could
+    // not carry a moving waveform.
+    #expect(distinct >= 10, "the meter reported \(distinct) times in a second")
+  }
 }
 
 /// What a sender declares to the realtime scheduler, which has to cover what a cycle actually does.

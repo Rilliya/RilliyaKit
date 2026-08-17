@@ -182,6 +182,14 @@ public final class AudioFileFrameStream: @unchecked Sendable {
   /// that wants to draw the file reads this instead.
   public func meterSnapshot() -> [AudioChannelMeterSnapshot] { meter.snapshot() }
 
+  /// Called whenever there is a new waveform to draw, on the thread that decoded it.
+  ///
+  /// Polling ``meterSnapshot()`` is not enough for anything that draws: with nothing to say the
+  /// audio moved, an interface redraws only when something else happens to change.
+  public func onMeter(_ handler: (@Sendable ([AudioChannelMeterSnapshot]) -> Void)?) {
+    meter.onPublish(handler)
+  }
+
   private let meter: AudioWaveformMeter
   private let streamID = UUID()
   private let url: URL

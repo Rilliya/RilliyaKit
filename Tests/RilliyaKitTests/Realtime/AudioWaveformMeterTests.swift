@@ -1,10 +1,11 @@
-// SPDX-License-Identifier: Apache-2.0
-
 import Foundation
 import RilliyaCore
 import Testing
+import os.lock
 
 @testable import RilliyaRealtime
+
+// SPDX-License-Identifier: Apache-2.0
 
 /// A source with no capture device behind it meters itself through this, so what it reports is
 /// the only thing an interface can draw for such a source.
@@ -13,8 +14,9 @@ struct AudioWaveformMeterTests {
   private enum Fixture {
     static let sampleRate = 48_000.0
     static let channelCount = 2
-    /// Fifty milliseconds at 48 kHz.
-    static let intervalFrameCount = 2_400
+    /// One publishing interval at 48 kHz, which is what fills before anything is reported.
+    static let intervalFrameCount = Int(
+      48_000 / Double(AudioWaveformMeter.defaultUpdatesPerSecond))
 
     static func channelIDs(_ count: Int = channelCount) -> [AudioChannelID] {
       let owner = AudioChannelOwnerID.source(.stream(UUID()))
@@ -163,6 +165,42 @@ struct AudioWaveformMeterTests {
     }
     // And the channels stayed apart rather than being averaged on the way in.
     #expect(fromPlanar[0].rootMeanSquare > fromPlanar[1].rootMeanSquare * 3)
+  }
+
+  /// Anything that draws needs telling rather than asking.
+  ///
+  /// A reader that only polls redraws when something else happens to change, which showed a
+  /// network stream's waveform moving about once every ten seconds instead of many times a
+  /// second.
+  @Test("A new interval tells whoever is drawing")
+  func publishingTells() {
+    let meter = Fixture.meter()
+    let told = OSAllocatedUnfairLock<[[AudioChannelMeterSnapshot]]>(initialState: [])
+    meter.onPublish { snapshots in told.withLock { $0.append(snapshots) } }
+
+    Self.feedTone(meter, frameCount: Fixture.intervalFrameCount, amplitude: 0.5)
+    Self.feedTone(meter, frameCount: Fixture.intervalFrameCount, amplitude: 0.2)
+
+    let reports = told.withLock { $0 }
+    #expect(reports.count == 2, "told \(reports.count) times for two intervals")
+    #expect(reports.allSatisfy { $0.count == Fixture.channelCount })
+    // What it was told matches what it would have read.
+    #expect(reports.last?.map(\.waveform) == meter.snapshot().map(\.waveform))
+  }
+
+  @Test("Nothing is told after the handler is taken away")
+  func publishingStopsWhenAsked() {
+    let meter = Fixture.meter()
+    let count = OSAllocatedUnfairLock<Int>(initialState: 0)
+    meter.onPublish { _ in count.withLock { $0 += 1 } }
+
+    Self.feedTone(meter, frameCount: Fixture.intervalFrameCount)
+    let afterFirst = count.withLock { $0 }
+    meter.onPublish(nil)
+    Self.feedTone(meter, frameCount: Fixture.intervalFrameCount)
+
+    #expect(afterFirst == 1)
+    #expect(count.withLock { $0 } == 1)
   }
 
   private static func feedTone(

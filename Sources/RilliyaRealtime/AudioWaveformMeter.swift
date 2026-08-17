@@ -14,12 +14,21 @@ import os.lock
 /// queued: a reader that is slow sees the newest audio rather than a backlog, which is what
 /// drawing wants and what keeps the producer from ever waiting.
 ///
-/// Measuring costs a pass over the samples, so a producer that runs where allocation is unsafe
-/// hands frames to ``submit(interleaved:frameCount:)`` and the measuring happens on the reader's
-/// side of the handoff, not the producer's.
+/// A reader can take the newest snapshot whenever it likes, but polling is not enough on its own:
+/// something drawing thirty times a second cannot discover a change it is never told about. Set
+/// ``onPublish`` to be told, and read ``snapshot()`` when a reader simply wants the latest.
+///
+/// Measuring costs one pass over the interval's samples and happens on the thread that completes
+/// it, so a producer running where allocation is unsafe must not submit to this directly.
 public final class AudioWaveformMeter: @unchecked Sendable {
   /// How often a snapshot is produced, which is what an interface can usefully draw.
-  public static let defaultInterval = Duration.milliseconds(50)
+  ///
+  /// The same rate a capture device meters itself at, so a stream and a microphone drawn side by
+  /// side move together. Faster would redraw a canvas that is otherwise idle for nothing.
+  public static let defaultUpdatesPerSecond = 30
+
+  /// The interval one snapshot covers.
+  public static let defaultInterval = Duration.milliseconds(1_000 / defaultUpdatesPerSecond)
 
   /// The samples one channel's drawn waveform is reduced to.
   public static let defaultWaveformSampleCount = 512
@@ -38,6 +47,8 @@ public final class AudioWaveformMeter: @unchecked Sendable {
   private var writtenFrameCount = 0
   private let lock = OSAllocatedUnfairLock<[AudioChannelMeterSnapshot]>(initialState: [])
   private let inputLock = NSLock()
+  private let handlerLock = NSLock()
+  private var publishHandler: (@Sendable ([AudioChannelMeterSnapshot]) -> Void)?
 
   /// Prepares a meter for a fixed channel layout.
   ///
@@ -118,6 +129,14 @@ public final class AudioWaveformMeter: @unchecked Sendable {
     lock.withLock { $0 }
   }
 
+  /// Called whenever a new snapshot is ready, on whichever thread completed the interval.
+  ///
+  /// Anything that draws needs telling rather than asking: a reader with no other reason to look
+  /// again shows the first waveform it happened to catch and nothing after it.
+  public func onPublish(_ handler: (@Sendable ([AudioChannelMeterSnapshot]) -> Void)?) {
+    handlerLock.withLock { publishHandler = handler }
+  }
+
   /// Forgets what was gathered, as a source that restarted requires.
   public func reset() {
     inputLock.withLock { writtenFrameCount = 0 }
@@ -148,5 +167,8 @@ public final class AudioWaveformMeter: @unchecked Sendable {
       )
     }
     lock.withLock { $0 = snapshots }
+    // Outside the locks: a handler is free to hop to wherever it draws.
+    let handler = handlerLock.withLock { publishHandler }
+    handler?(snapshots)
   }
 }
