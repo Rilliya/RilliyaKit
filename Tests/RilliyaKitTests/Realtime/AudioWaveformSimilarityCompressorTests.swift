@@ -170,11 +170,11 @@ struct AudioWaveformSimilarityCompressorTests {
           let outputPointers = (0..<channelCount).map {
             outputStorage[$0].withUnsafeMutableBufferPointer { $0.baseAddress! }
           }
-          return inputPointers.withUnsafeBufferPointer { input in
-            outputPointers.withUnsafeBufferPointer { output in
+          return inputPointers.withUnsafeBufferPointer { inputChannels in
+            outputPointers.withUnsafeBufferPointer { outputChannels in
               compressor.compress(
-                input: input,
-                output: output,
+                input: inputChannels,
+                output: outputChannels,
                 outputFrameCount: Fixture.outputFrameCount,
                 removal: removal
               )
