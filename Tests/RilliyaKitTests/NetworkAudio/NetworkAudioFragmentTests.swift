@@ -24,7 +24,7 @@ struct NetworkAudioFragmentReassemblerTests {
       outcome = try harness.admit(block, index: index, of: 4, firstSequence: 0)
     }
 
-    #expect(outcome == .completed(harness.joined(block)))
+    #expect(outcome == .completed([harness.joined(block)]))
     #expect(harness.reassembler.heldBlockCount == 0)
   }
 
@@ -40,7 +40,7 @@ struct NetworkAudioFragmentReassemblerTests {
       outcome = try harness.admit(block, index: index, of: 5, firstSequence: 0)
     }
 
-    #expect(outcome == .completed(harness.joined(block)))
+    #expect(outcome == .completed([harness.joined(block)]))
   }
 
   @Test("A block is held while a piece is outstanding")
@@ -299,8 +299,10 @@ struct NetworkAudioLosslessWireTests {
     for index in [0, 1, 3] { _ = try harness.admit(block, index: index, of: 4, firstSequence: 0) }
     var completed = 0
     for index in 0..<4 {
-      if case .completed = try harness.admit(block, index: index, of: 4, firstSequence: 4) {
-        completed += 1
+      if case .completed(let blocks) = try harness.admit(
+        block, index: index, of: 4, firstSequence: 4)
+      {
+        completed += blocks.count
       }
     }
 
@@ -313,6 +315,84 @@ struct NetworkAudioLosslessWireTests {
     init() throws {
       reassembler = try NetworkAudioFragmentReassembler(
         blockCount: 2,
+        maximumFragmentByteCount: 64
+      )
+    }
+
+    func block(pieces: Int) -> [Data] {
+      (0..<pieces).map { index in Data((0..<64).map { UInt8((index * 7 + $0) % 251) }) }
+    }
+
+    func admit(
+      _ block: [Data],
+      index: Int,
+      of count: Int,
+      firstSequence: UInt64
+    ) throws -> NetworkAudioReassembly {
+      reassembler.admit(
+        sequence: firstSequence &+ UInt64(index),
+        fragment: try NetworkAudioPacketFragment(index: index, count: count),
+        payload: block[index]
+      )
+    }
+  }
+}
+
+/// Blocks leave in the order they were sent, not the order they finish arriving, which is what
+/// makes a further reorder stage unnecessary for a split stream.
+@Suite("Network audio block ordering")
+struct NetworkAudioBlockOrderTests {
+  @Test("A block that finishes early waits for the one before it")
+  func laterBlockWaits() throws {
+    let harness = try Harness()
+    let block = harness.block(pieces: 2)
+
+    // The second block completes while the first is still a piece short.
+    _ = try harness.admit(block, index: 0, of: 2, firstSequence: 0)
+    let early = try harness.admit(block, index: 0, of: 2, firstSequence: 2)
+    let stillEarly = try harness.admit(block, index: 1, of: 2, firstSequence: 2)
+
+    #expect(early == .held)
+    #expect(stillEarly == .held)
+
+    // Completing the first releases both, oldest first.
+    let outcome = try harness.admit(block, index: 1, of: 2, firstSequence: 0)
+    guard case .completed(let released) = outcome else {
+      Issue.record("the first block did not release both")
+      return
+    }
+    #expect(released.count == 2)
+  }
+
+  /// A block whose piece never arrives would otherwise hold every later block behind it.
+  @Test("Giving up on a stalled block releases what was waiting behind it")
+  func abandoningReleasesTheQueue() throws {
+    let harness = try Harness()
+    let block = harness.block(pieces: 2)
+
+    _ = try harness.admit(block, index: 0, of: 2, firstSequence: 0)
+    _ = try harness.admit(block, index: 0, of: 2, firstSequence: 2)
+    #expect(try harness.admit(block, index: 1, of: 2, firstSequence: 2) == .held)
+
+    let released = harness.reassembler.abandonOldest()
+
+    #expect(released.count == 1)
+    #expect(harness.reassembler.heldBlockCount == 0)
+  }
+
+  @Test("Giving up when nothing is stalled releases nothing")
+  func abandoningNothingReleasesNothing() throws {
+    let harness = try Harness()
+
+    #expect(harness.reassembler.abandonOldest().isEmpty)
+  }
+
+  private final class Harness {
+    let reassembler: NetworkAudioFragmentReassembler
+
+    init() throws {
+      reassembler = try NetworkAudioFragmentReassembler(
+        blockCount: 4,
         maximumFragmentByteCount: 64
       )
     }

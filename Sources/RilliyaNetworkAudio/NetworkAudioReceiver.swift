@@ -431,14 +431,24 @@ final class NetworkAudioPacketIngestor {
       if !packet.codecConfiguration.isEmpty {
         configurationBytes = packet.codecConfiguration
       }
-      // A block wider than a datagram is not audio until every piece of it is present.
-      let block: Data
+      // A block wider than a datagram is not audio until every piece of it is present, and the
+      // reassembler releases whole blocks in the order they were sent, so a split stream needs no
+      // further reordering.
       if let fragment = packet.fragment {
-        switch reassembler.admit(
+        let outcome = reassembler.admit(
           sequence: packet.sequence, fragment: fragment, payload: packet.payload)
-        {
-        case .completed(let whole):
-          block = whole
+        switch outcome {
+        case .completed(let blocks):
+          var written = 0
+          for block in blocks {
+            guard let frames = decodeCompressed(packet, block: block) else { continue }
+            writeDecoded(frameCount: frames)
+            written += frames
+          }
+          lastFrameCount = written
+          lastAcceptedTime = now
+          increment(\Self.acceptedPacketCount)
+          return .accepted(frameCount: written)
         case .held:
           lastAcceptedTime = now
           increment(\Self.acceptedPacketCount)
@@ -447,10 +457,8 @@ final class NetworkAudioPacketIngestor {
           increment(\Self.stalePacketCount)
           return .stale
         }
-      } else {
-        block = packet.payload
       }
-      guard let frames = decodeCompressed(packet, block: block) else {
+      guard let frames = decodeCompressed(packet, block: packet.payload) else {
         increment(\Self.rejectedPacketCount)
         return .rejected
       }
@@ -527,6 +535,18 @@ final class NetworkAudioPacketIngestor {
     reorderBuffer.reset()
     resetDecoder()
     lastFrameCount = 0
+  }
+
+  /// Writes what the decoder produced straight to the queue.
+  ///
+  /// A reassembled block is already in order, so it does not pass through the reorder buffer.
+  private func writeDecoded(frameCount: Int) {
+    guard frameCount > 0 else { return }
+    _ = frameBuffer.writeInterleaved(
+      interleavedStorage,
+      channelCount: configuration.format.channelCount,
+      frameCount: frameCount
+    )
   }
 
   /// Expands one compressed packet, building the decoder the first time a shape is seen.

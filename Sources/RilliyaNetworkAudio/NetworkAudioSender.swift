@@ -530,8 +530,13 @@ private final class NetworkAudioSenderPacketizer: @unchecked Sendable {
       encoder: encoder,
       interleaved: interleaved,
       interleavedSampleCount: sampleCount,
+      // The whole block is encoded here and split afterwards, so this is sized by what the
+      // codec produces rather than by what one datagram carries.
       packet: UnsafeMutableRawBufferPointer.allocate(
-        byteCount: configuration.maximumCompressedPacketByteCount,
+        byteCount: codec.maximumPacketByteCount(
+          sampleRate: configuration.format.sampleRate,
+          channelCount: configuration.format.channelCount
+        ),
         alignment: 16
       )
     )

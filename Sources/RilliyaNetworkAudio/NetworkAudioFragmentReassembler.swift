@@ -10,8 +10,11 @@ public enum NetworkAudioReassemblyError: Error, Equatable, Sendable {
 
 /// What offering a fragment produced.
 public enum NetworkAudioReassembly: Equatable, Sendable {
-  /// The block is now whole, and its bytes are the value.
-  case completed(Data)
+  /// One or more blocks are now whole, in the order they were sent.
+  ///
+  /// More than one when a piece completed a block that a later, already-whole block was waiting
+  /// behind.
+  case completed([Data])
 
   /// The block is still waiting for pieces.
   case held
@@ -29,6 +32,10 @@ public enum NetworkAudioReassembly: Equatable, Sendable {
 /// not audio until the whole block is present. A block is lost entirely if any of its pieces is,
 /// which is what makes splitting expensive on a lossy link and why the pieces a block is still
 /// missing are reported: they are exactly what is worth asking the sender for.
+///
+/// Blocks are released in the order they were sent, not the order they complete: a later block
+/// whose pieces all arrived waits for the one before it, which is what makes a further reorder
+/// stage unnecessary for a split stream.
 ///
 /// Only a bounded number of blocks are held at once, and a block is given up on when one far
 /// enough ahead of it arrives, so a piece that never comes cannot hold storage for ever.
@@ -123,9 +130,22 @@ public final class NetworkAudioFragmentReassembler {
     blocks[slot].received += 1
 
     guard blocks[slot].received == blocks[slot].fragmentCount else { return .held }
-    let block = collect(slot: slot)
-    clear(slot)
-    return .completed(block)
+    let ready = releaseInOrder()
+    return ready.isEmpty ? .held : .completed(ready)
+  }
+
+  /// Releases every whole block from the oldest onward, stopping at the first still waiting.
+  private func releaseInOrder() -> [Data] {
+    var released: [Data] = []
+    while true {
+      let occupied = blocks.indices.filter { blocks[$0].isOccupied }
+      guard let oldest = occupied.min(by: { blocks[$0].firstSequence < blocks[$1].firstSequence })
+      else { break }
+      guard blocks[oldest].received == blocks[oldest].fragmentCount else { break }
+      released.append(collect(slot: oldest))
+      clear(oldest)
+    }
+    return released
   }
 
   /// The sequences a held block is still missing, which is what is worth asking for.
@@ -139,6 +159,18 @@ public final class NetworkAudioFragmentReassembler {
       }
     }
     return missing.sorted()
+  }
+
+  /// Gives up on the oldest block still waiting, releasing whatever it was holding back.
+  ///
+  /// A block whose piece never arrives would otherwise hold every later block behind it.
+  public func abandonOldest() -> [Data] {
+    let occupied = blocks.indices.filter { blocks[$0].isOccupied }
+    guard let oldest = occupied.min(by: { blocks[$0].firstSequence < blocks[$1].firstSequence })
+    else { return [] }
+    guard blocks[oldest].received < blocks[oldest].fragmentCount else { return [] }
+    clear(oldest)
+    return releaseInOrder()
   }
 
   /// Forgets everything, as a new session requires.
