@@ -14,6 +14,30 @@ struct NetworkAudioFragmentReassemblerTests {
     static let fragmentByteCount = 64
   }
 
+  /// A piece claiming a place further along than its own sequence names no block that exists.
+  ///
+  /// Subtracting anyway wrapped to near `UInt64.max`, and that became the newest
+  /// sequence seen — after which every genuine piece was refused as too late, for the rest of the
+  /// session. One datagram, no key needed, and every split block gone with it.
+  @Test("A piece claiming a place before the start of the stream cannot wedge reassembly")
+  func underflowingPieceCannotWedgeReassembly() throws {
+    let harness = try Harness(blockCount: 2)
+    let block = harness.block(pieces: 2)
+
+    let hostile = harness.reassembler.admit(
+      sequence: 0,
+      fragment: try NetworkAudioPacketFragment(index: 1, count: 2),
+      payload: block[1]
+    )
+    #expect(hostile == .tooLate)
+
+    // A genuine two-piece block at sequences 1 and 2 still completes.
+    _ = try harness.admit(block, index: 0, of: 2, firstSequence: 1)
+    let outcome = try harness.admit(block, index: 1, of: 2, firstSequence: 1)
+
+    #expect(outcome == .completed([harness.joined(block)]))
+  }
+
   @Test("A block arriving in order comes back whole")
   func orderedBlockCompletes() throws {
     let harness = try Harness()

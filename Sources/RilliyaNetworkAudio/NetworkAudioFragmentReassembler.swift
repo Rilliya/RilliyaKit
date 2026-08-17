@@ -94,7 +94,11 @@ public final class NetworkAudioFragmentReassembler {
   ) -> NetworkAudioReassembly {
     guard payload.count <= maximumFragmentByteCount else { return .tooLate }
     // Every piece of a block occupies consecutive sequences, so the block is named by the first.
-    let firstSequence = sequence &- UInt64(fragment.index)
+    // A piece claiming a place further along than its own sequence names no block that could
+    // exist; subtracting anyway wraps to near `UInt64.max`, and one such datagram would set
+    // `newestSequence` high enough to refuse every genuine piece for the rest of the session.
+    guard sequence >= UInt64(fragment.index) else { return .tooLate }
+    let firstSequence = sequence - UInt64(fragment.index)
     if let newest = newestSequence {
       guard firstSequence &+ UInt64(blockCount) > newest else { return .tooLate }
       newestSequence = max(newest, firstSequence)
