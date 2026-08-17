@@ -289,7 +289,17 @@ public final class NetworkAudioReceiver: @unchecked Sendable {
   }
 
   private func accept(_ connection: NWConnection) {
-    lock.withLock { connections[ObjectIdentifier(connection)] = connection }
+    // A connection handler already queued when `stop()` ran would otherwise start a connection the
+    // stopped receiver goes on reading audio from, and which nothing cancels until it is released.
+    let shouldAccept = lock.withLock { () -> Bool in
+      guard case .running = state else { return false }
+      connections[ObjectIdentifier(connection)] = connection
+      return true
+    }
+    guard shouldAccept else {
+      connection.cancel()
+      return
+    }
     connection.start(queue: queue)
     receiveNext(on: connection)
   }
@@ -528,14 +538,20 @@ final class NetworkAudioPacketIngestor {
   ///
   /// The session identifier is authenticated but not encrypted, precisely so a receiver can read
   /// it before opening the payload.
+  ///
+  /// Written under the same lock it is read under. Only the listener's queue reaches this today,
+  /// so nothing races on it yet; leaving the write outside the lock would make that an accident of
+  /// how connections happen to be scheduled rather than something the code says.
   private func cipher(for data: Data) throws -> NetworkAudioSessionCipher? {
     guard let sharedKey = configuration.sharedKey else { return nil }
     let sessionID = try NetworkAudioPacketCodec.sessionID(of: data)
-    if cipherSessionID != sessionID {
-      cipher = NetworkAudioSessionCipher(sharedKey: sharedKey, sessionID: sessionID)
-      cipherSessionID = sessionID
+    return statisticsLock.withLock {
+      if cipherSessionID != sessionID {
+        cipher = NetworkAudioSessionCipher(sharedKey: sharedKey, sessionID: sessionID)
+        cipherSessionID = sessionID
+      }
+      return cipher
     }
-    return cipher
   }
 
   /// Drops whatever the previous session left held rather than placing it in the new one.
