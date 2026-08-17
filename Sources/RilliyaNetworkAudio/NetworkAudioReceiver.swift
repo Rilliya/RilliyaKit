@@ -21,6 +21,9 @@ public struct NetworkAudioReceiverConfiguration: Equatable, Hashable, Sendable {
   /// The quiet interval after which a different sender session may take ownership.
   public let sessionTakeoverInterval: Duration
 
+  /// How much audio the receiver holds before a render callback may read it.
+  public let jitter: AudioJitterBufferConfiguration
+
   /// Creates validated receiver controls with bounded packet and PCM storage.
   public init(
     port: UInt16,
@@ -28,7 +31,8 @@ public struct NetworkAudioReceiverConfiguration: Equatable, Hashable, Sendable {
     capacityFrameCount: Int = 32_768,
     maximumDatagramByteCount: Int = NetworkAudioSenderConfiguration
       .defaultMaximumDatagramByteCount,
-    sessionTakeoverInterval: Duration = .seconds(1)
+    sessionTakeoverInterval: Duration = .seconds(1),
+    jitter: AudioJitterBufferConfiguration = .localNetwork
   ) throws {
     guard port > 0 else { throw NetworkAudioReceiverError.invalidPort }
     let minimumDatagramByteCount =
@@ -53,6 +57,7 @@ public struct NetworkAudioReceiverConfiguration: Equatable, Hashable, Sendable {
     self.capacityFrameCount = capacityFrameCount
     self.maximumDatagramByteCount = maximumDatagramByteCount
     self.sessionTakeoverInterval = sessionTakeoverInterval
+    self.jitter = jitter
   }
 }
 
@@ -128,8 +133,14 @@ public final class NetworkAudioReceiver: @unchecked Sendable {
   /// The immutable receiver controls.
   public let configuration: NetworkAudioReceiverConfiguration
 
-  /// The single-consumer PCM queue read by a prepared graph.
+  /// The single-consumer PCM queue the ingestor fills.
   public let frameBuffer: AudioRealtimeFrameBuffer
+
+  /// The paced view of ``frameBuffer`` a prepared graph reads.
+  ///
+  /// Reading the queue directly drains it to empty, which turns every late packet into a gap and
+  /// leaves the inserted silence behind as delay.
+  public let jitterBuffer: AudioJitterBuffer
 
   private enum State {
     case ready
@@ -161,6 +172,10 @@ public final class NetworkAudioReceiver: @unchecked Sendable {
         channelCount: configuration.format.channelCount
       ),
       capacityFrameCount: configuration.capacityFrameCount
+    )
+    jitterBuffer = try AudioJitterBuffer(
+      frameBuffer: frameBuffer,
+      configuration: configuration.jitter
     )
     ingestor = NetworkAudioPacketIngestor(
       configuration: configuration,
