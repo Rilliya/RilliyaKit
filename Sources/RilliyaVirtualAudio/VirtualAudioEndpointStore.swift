@@ -78,7 +78,10 @@ extension VirtualAudioEndpointStoreOperation {
 /// published endpoint is running, so concurrent or unsafe updates fail instead of silently
 /// replacing live device state.
 public actor VirtualAudioEndpointStore {
-  /// The clean-room driver's stable bundle identifier.
+  /// The bundle identifier of the clean-room driver this package is written against.
+  ///
+  /// A build of that driver published under a different identifier is reached by passing it to
+  /// ``init(driverBundleIdentifier:)``.
   public static let driverBundleIdentifier =
     "moe.uwucocoa.rilliya.virtual-audio-driver"
 
@@ -88,9 +91,13 @@ public actor VirtualAudioEndpointStore {
   private let driverBundleIdentifier: String
   private let propertyAccess: any VirtualAudioEndpointDriverPropertyAccess
 
-  /// Creates a store that manages the installed Rilliya driver.
-  public init() {
-    driverBundleIdentifier = Self.driverBundleIdentifier
+  /// Creates a store for the virtual audio driver Core Audio publishes under
+  /// `driverBundleIdentifier`.
+  ///
+  /// - Parameter driverBundleIdentifier: The driver to manage, defaulting to the identifier this
+  ///   package is written against.
+  public init(driverBundleIdentifier: String = VirtualAudioEndpointStore.driverBundleIdentifier) {
+    self.driverBundleIdentifier = driverBundleIdentifier
     propertyAccess = SystemVirtualAudioEndpointDriverPropertyAccess()
   }
 
