@@ -55,21 +55,34 @@ struct NetworkAudioOpusRoundTripTests {
     static let channelCount = 2
     static let frameCount = 480
     static let bitRate = 128_000
-    static let frequency = 440.0
     static let blocks = 40
+
+    /// Each channel carries its own tone at its own level, so a codec that returned one channel
+    /// in place of the other would be visible rather than silently correct.
+    static let frequency = [440.0, 1_320.0]
+    static let amplitude: [Float] = [0.25, 0.125]
+
+    /// How far a lossy round trip may move a level before it counts as the wrong audio.
+    static let levelTolerance: Float = 0.2
   }
 
-  /// The point of carrying Opus is that far fewer bytes cross the network.
-  @Test("A compressed packet is a fraction of the samples it replaces")
+  /// The point of carrying Opus is that far fewer bytes cross the network, and the bit rate asked
+  /// for is what decides how many.
+  @Test("A compressed packet is the size the bit rate asked for")
   func compressionIsSubstantial() throws {
     let harness = try Harness()
 
     let byteCounts = try (0..<Fixture.blocks).map { try harness.encodeBlock($0) }
 
     let raw = Fixture.frameCount * Fixture.channelCount * MemoryLayout<Float>.stride
+    let blocksPerSecond = Int(Fixture.sampleRate) / Fixture.frameCount
+    let asked = Fixture.bitRate / 8 / blocksPerSecond
     let mean = byteCounts.reduce(0, +) / byteCounts.count
-    #expect(mean > 0)
+
     #expect(mean < raw / 8)
+    // A bound around what was asked for, so an encoder ignoring the bit rate fails here.
+    #expect(mean > asked * 3 / 4)
+    #expect(mean < asked * 5 / 4)
   }
 
   /// A packet larger than the codec's own bound would overrun the storage it is copied into.
@@ -82,20 +95,27 @@ struct NetworkAudioOpusRoundTripTests {
     }
   }
 
-  /// Compression is lossy, so the test is that the tone comes back, not that the samples do.
-  @Test("A tone survives the round trip at its own frequency and level")
+  /// Compression is lossy, so the test is that each tone comes back, not that the samples do.
+  ///
+  /// Both channels are read: the two carry different tones at different levels, so a codec that
+  /// dropped one or returned the other in its place fails here rather than passing quietly.
+  @Test("Each channel survives the round trip at its own frequency and level")
   func toneSurvivesTheRoundTrip() throws {
     let harness = try Harness()
 
     let decoded = try harness.roundTrip(blocks: Fixture.blocks)
 
-    // The codec looks ahead, so the opening blocks are still filling.
-    let settled = Array(decoded.dropFirst(Fixture.frameCount * 4))
-    #expect(harness.level(settled) > 0.15)
-    #expect(harness.level(settled) < 0.30)
-    #expect(
-      abs(harness.dominantFrequency(settled) - Fixture.frequency) < 5
-    )
+    #expect(decoded.count == Fixture.channelCount)
+    for channel in 0..<Fixture.channelCount {
+      // The codec looks ahead, so the opening blocks are still filling.
+      let settled = Array(decoded[channel].dropFirst(Fixture.frameCount * 4))
+      let expected = harness.sourceLevel(channel: channel, frameCount: settled.count)
+      let level = harness.level(settled)
+
+      #expect(expected > 0)
+      #expect(abs(level - expected) < expected * Fixture.levelTolerance)
+      #expect(abs(harness.dominantFrequency(settled) - Fixture.frequency[channel]) < 5)
+    }
   }
 
   /// The decoder looks ahead, so a caller that assumed a full block from the first packet would
@@ -191,15 +211,31 @@ struct NetworkAudioOpusRoundTripTests {
       packet.deallocate()
     }
 
-    /// Fills the input with the block of the tone starting at `block`, and compresses it.
+    /// The sample the source holds for one channel at one position.
+    func sample(channel: Int, position: Int) -> Float {
+      let radians = 2 * .pi * Fixture.frequency[channel] * Double(position) / Fixture.sampleRate
+      return Fixture.amplitude[channel] * Float(sin(radians))
+    }
+
+    /// The level the source itself carries, so a decoded level is judged against what was sent
+    /// rather than against a number written down beside it.
+    func sourceLevel(channel: Int, frameCount: Int) -> Float {
+      guard frameCount > 0 else { return 0 }
+      var sum: Float = 0
+      for position in 0..<frameCount {
+        let value = sample(channel: channel, position: position)
+        sum += value * value
+      }
+      return (sum / Float(frameCount)).squareRoot()
+    }
+
+    /// Fills the input with the block of the tones starting at `block`, and compresses it.
     func encodeBlock(_ block: Int) throws -> Int {
       for frame in 0..<Fixture.frameCount {
         let position = block * Fixture.frameCount + frame
-        let value = Float(
-          0.25 * sin(2 * .pi * Fixture.frequency * Double(position) / Fixture.sampleRate)
-        )
         for channel in 0..<Fixture.channelCount {
-          input[frame * Fixture.channelCount + channel] = value
+          input[frame * Fixture.channelCount + channel] = sample(
+            channel: channel, position: position)
         }
       }
       return try encoder.encode(
@@ -218,14 +254,16 @@ struct NetworkAudioOpusRoundTripTests {
       )
     }
 
-    /// One channel of everything that came back.
-    func roundTrip(blocks: Int) throws -> [Float] {
-      var decoded: [Float] = []
+    /// Everything that came back, one array per channel.
+    func roundTrip(blocks: Int) throws -> [[Float]] {
+      var decoded = Array(repeating: [Float](), count: Fixture.channelCount)
       for block in 0..<blocks {
         let byteCount = try encodeBlock(block)
         let frames = try decodeBlock(byteCount: byteCount)
         for frame in 0..<frames {
-          decoded.append(output[frame * Fixture.channelCount])
+          for channel in 0..<Fixture.channelCount {
+            decoded[channel].append(output[frame * Fixture.channelCount + channel])
+          }
         }
       }
       return decoded
