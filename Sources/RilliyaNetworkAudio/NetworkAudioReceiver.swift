@@ -24,6 +24,12 @@ public struct NetworkAudioReceiverConfiguration: Equatable, Hashable, Sendable {
   /// How much audio the receiver holds before a render callback may read it.
   public let jitter: AudioJitterBufferConfiguration
 
+  /// The key both peers share, or `nil` to accept audio in the clear.
+  ///
+  /// A configured key also rejects unencrypted datagrams, so reaching the port is not enough to
+  /// be heard.
+  public let sharedKey: NetworkAudioSharedKey?
+
   /// Creates validated receiver controls with bounded packet and PCM storage.
   public init(
     port: UInt16,
@@ -32,7 +38,8 @@ public struct NetworkAudioReceiverConfiguration: Equatable, Hashable, Sendable {
     maximumDatagramByteCount: Int = NetworkAudioSenderConfiguration
       .defaultMaximumDatagramByteCount,
     sessionTakeoverInterval: Duration = .seconds(1),
-    jitter: AudioJitterBufferConfiguration = .localNetwork
+    jitter: AudioJitterBufferConfiguration = .localNetwork,
+    sharedKey: NetworkAudioSharedKey? = nil
   ) throws {
     guard port > 0 else { throw NetworkAudioReceiverError.invalidPort }
     let minimumDatagramByteCount =
@@ -58,6 +65,7 @@ public struct NetworkAudioReceiverConfiguration: Equatable, Hashable, Sendable {
     self.maximumDatagramByteCount = maximumDatagramByteCount
     self.sessionTakeoverInterval = sessionTakeoverInterval
     self.jitter = jitter
+    self.sharedKey = sharedKey
   }
 }
 
@@ -284,6 +292,8 @@ final class NetworkAudioPacketIngestor {
   private var stalePacketCount: UInt64 = 0
   private var missingPacketCount: UInt64 = 0
   private var activeSessionID: UUID?
+  private var cipherSessionID: UUID?
+  private var cipher: NetworkAudioSessionCipher?
   private var lastSequence: UInt64?
   private var lastFrameCount = 0
   private var lastAcceptedTime: UInt64 = 0
@@ -319,7 +329,7 @@ final class NetworkAudioPacketIngestor {
     }
     let packet: NetworkAudioPacket
     do {
-      packet = try NetworkAudioPacketCodec.decode(data)
+      packet = try NetworkAudioPacketCodec.decode(data, cipher: try cipher(for: data))
     } catch {
       increment(\Self.rejectedPacketCount)
       return .rejected
@@ -378,6 +388,20 @@ final class NetworkAudioPacketIngestor {
         frameBuffer: frameBuffer.statistics()
       )
     }
+  }
+
+  /// Derives the session key once per sender session rather than once per packet.
+  ///
+  /// The session identifier is authenticated but not encrypted, precisely so a receiver can read
+  /// it before opening the payload.
+  private func cipher(for data: Data) throws -> NetworkAudioSessionCipher? {
+    guard let sharedKey = configuration.sharedKey else { return nil }
+    let sessionID = try NetworkAudioPacketCodec.sessionID(of: data)
+    if cipherSessionID != sessionID {
+      cipher = NetworkAudioSessionCipher(sharedKey: sharedKey, sessionID: sessionID)
+      cipherSessionID = sessionID
+    }
+    return cipher
   }
 
   private func resetSession(to sessionID: UUID) {

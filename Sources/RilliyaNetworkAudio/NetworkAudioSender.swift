@@ -28,6 +28,9 @@ public struct NetworkAudioSenderConfiguration: Equatable, Hashable, Sendable {
   /// The largest emitted datagram, including its protocol header.
   public let maximumDatagramByteCount: Int
 
+  /// The key both peers share, or `nil` to send in the clear.
+  public let sharedKey: NetworkAudioSharedKey?
+
   /// The frames each datagram carries.
   ///
   /// Matching the producer's render quantum keeps one rendered block in one datagram; leaving it
@@ -42,7 +45,8 @@ public struct NetworkAudioSenderConfiguration: Equatable, Hashable, Sendable {
     sessionID: UUID = UUID(),
     capacityFrameCount: Int = 16_384,
     maximumDatagramByteCount: Int = defaultMaximumDatagramByteCount,
-    framesPerPacket: Int? = nil
+    framesPerPacket: Int? = nil,
+    sharedKey: NetworkAudioSharedKey? = nil
   ) throws {
     let normalizedHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !normalizedHost.isEmpty, normalizedHost.utf8.count <= 255 else {
@@ -69,8 +73,10 @@ public struct NetworkAudioSenderConfiguration: Equatable, Hashable, Sendable {
     self.sessionID = sessionID
     self.capacityFrameCount = capacityFrameCount
     self.maximumDatagramByteCount = maximumDatagramByteCount
+    self.sharedKey = sharedKey
     let maximumFrames =
-      (maximumDatagramByteCount - NetworkAudioPacketCodec.headerByteCount)
+      (maximumDatagramByteCount - NetworkAudioPacketCodec.headerByteCount
+        - (sharedKey == nil ? 0 : NetworkAudioSessionCipher.tagByteCount))
       / format.channelCount / MemoryLayout<Float>.stride
     guard maximumFrames >= 1 else { throw NetworkAudioSenderError.invalidDatagramBound }
     if let framesPerPacket {
@@ -86,8 +92,11 @@ public struct NetworkAudioSenderConfiguration: Equatable, Hashable, Sendable {
   }
 
   var maximumFrameCountPerPacket: Int {
-    (maximumDatagramByteCount - NetworkAudioPacketCodec.headerByteCount)
-      / format.channelCount / MemoryLayout<Float>.stride
+    let overhead =
+      NetworkAudioPacketCodec.headerByteCount
+      + (sharedKey == nil ? 0 : NetworkAudioSessionCipher.tagByteCount)
+    return (maximumDatagramByteCount - overhead) / format.channelCount
+      / MemoryLayout<Float>.stride
   }
 }
 
@@ -316,6 +325,7 @@ private final class NetworkAudioSenderPacketizer: @unchecked Sendable {
   private let channelStorage: [UnsafeMutablePointer<Float>]
   private let readOnlyPointers: [UnsafePointer<Float>]
   private let datagram: UnsafeMutableRawBufferPointer
+  private let cipher: NetworkAudioSessionCipher?
   private var sequence: UInt64 = 0
 
   init(
@@ -324,6 +334,9 @@ private final class NetworkAudioSenderPacketizer: @unchecked Sendable {
   ) {
     self.configuration = configuration
     self.frameBuffer = frameBuffer
+    cipher = configuration.sharedKey.map {
+      NetworkAudioSessionCipher(sharedKey: $0, sessionID: configuration.sessionID)
+    }
     let storage = (0..<configuration.format.channelCount).map { _ in
       UnsafeMutablePointer<Float>.allocate(capacity: configuration.framesPerPacket)
     }
@@ -333,7 +346,7 @@ private final class NetworkAudioSenderPacketizer: @unchecked Sendable {
       byteCount: NetworkAudioPacketCodec.datagramByteCount(
         channelCount: configuration.format.channelCount,
         frameCount: configuration.framesPerPacket
-      ),
+      ) + NetworkAudioSessionCipher.tagByteCount,
       alignment: MemoryLayout<UInt64>.alignment
     )
   }
@@ -361,7 +374,8 @@ private final class NetworkAudioSenderPacketizer: @unchecked Sendable {
           format: configuration.format,
           frameCount: frameCount,
           planarChannels: $0,
-          into: datagram
+          into: datagram,
+          cipher: cipher
         )
       }
     } catch {

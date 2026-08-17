@@ -162,6 +162,9 @@ public enum NetworkAudioPacketCodec {
   public static let maximumPayloadByteCount =
     maximumDatagramByteCount - headerByteCount
 
+  /// Set when the payload is sealed and an authentication tag follows it.
+  public static let encryptedFlag: UInt16 = 0x0001
+
   private static let magic: UInt32 = 0x524C_5941  // RLYA
   private static let interleavedFloat32Encoding: UInt8 = 1
 
@@ -206,7 +209,8 @@ public enum NetworkAudioPacketCodec {
     format: NetworkAudioStreamFormat,
     frameCount: Int,
     planarChannels: UnsafeBufferPointer<UnsafePointer<Float>>,
-    into destination: UnsafeMutableRawBufferPointer
+    into destination: UnsafeMutableRawBufferPointer,
+    cipher: NetworkAudioSessionCipher? = nil
   ) throws -> Int {
     guard frameCount > 0, frameCount <= Int(UInt16.max) else {
       throw NetworkAudioPacketError.invalidFrameCount(frameCount)
@@ -215,7 +219,8 @@ public enum NetworkAudioPacketCodec {
       throw NetworkAudioPacketError.invalidChannelCount(planarChannels.count)
     }
     let payloadByteCount = format.channelCount * frameCount * MemoryLayout<Float>.stride
-    let datagramByteCount = headerByteCount + payloadByteCount
+    let tagByteCount = cipher == nil ? 0 : NetworkAudioSessionCipher.tagByteCount
+    let datagramByteCount = headerByteCount + payloadByteCount + tagByteCount
     guard datagramByteCount <= maximumDatagramByteCount,
       destination.count >= datagramByteCount
     else {
@@ -226,7 +231,7 @@ public enum NetworkAudioPacketCodec {
     cursor.appendInteger(magic)
     cursor.appendByte(version)
     cursor.appendByte(interleavedFloat32Encoding)
-    cursor.appendInteger(UInt16(0))
+    cursor.appendInteger(cipher == nil ? UInt16(0) : encryptedFlag)
     withUnsafeBytes(of: sessionID.uuid) { cursor.appendBytes($0) }
     cursor.appendInteger(sequence)
     cursor.appendInteger(UInt32(format.sampleRate.rounded()))
@@ -246,11 +251,46 @@ public enum NetworkAudioPacketCodec {
         index += 1
       }
     }
-    return datagramByteCount
+    guard let cipher else { return datagramByteCount }
+    // The flag is already in the header, so sealing covers the value the receiver will check.
+    return headerByteCount
+      + (try UnsafeRawBufferPointer(rebasing: destination[0..<headerByteCount]).withMemoryRebound(
+        to: UInt8.self
+      ) { header in
+        try cipher.seal(
+          payload: UnsafeMutableRawBufferPointer(
+            rebasing: destination[headerByteCount..<(headerByteCount + payloadByteCount)]
+          ),
+          sequence: sequence,
+          authenticating: UnsafeRawBufferPointer(header)
+        )
+      })
+  }
+
+  /// Reads the session identifier from a datagram's header without decoding the rest.
+  ///
+  /// A receiver derives its session key from this, so it has to be readable before the payload
+  /// can be opened. It is authenticated but not encrypted for exactly that reason.
+  public static func sessionID(of data: Data) throws -> UUID {
+    guard data.count >= headerByteCount else { throw NetworkAudioPacketError.truncated }
+    var cursor = DataCursor(data: data)
+    guard try cursor.readInteger(as: UInt32.self) == magic else {
+      throw NetworkAudioPacketError.invalidMagic
+    }
+    let decodedVersion = try cursor.readByte()
+    guard decodedVersion == version else {
+      throw NetworkAudioPacketError.unsupportedVersion(decodedVersion)
+    }
+    _ = try cursor.readByte()
+    _ = try cursor.readInteger(as: UInt16.self)
+    return try cursor.readUUID()
   }
 
   /// Parses one untrusted datagram and rejects malformed metadata before exposing its payload.
-  public static func decode(_ data: Data) throws -> NetworkAudioPacket {
+  public static func decode(
+    _ data: Data,
+    cipher: NetworkAudioSessionCipher? = nil
+  ) throws -> NetworkAudioPacket {
     guard data.count <= maximumDatagramByteCount else {
       throw NetworkAudioPacketError.datagramTooLarge
     }
@@ -268,7 +308,17 @@ public enum NetworkAudioPacketCodec {
       throw NetworkAudioPacketError.unsupportedEncoding(encoding)
     }
     let flags = try cursor.readInteger(as: UInt16.self)
-    guard flags == 0 else { throw NetworkAudioPacketError.unsupportedFlags(flags) }
+    guard flags & ~encryptedFlag == 0 else {
+      throw NetworkAudioPacketError.unsupportedFlags(flags)
+    }
+    let isEncrypted = flags & encryptedFlag != 0
+    guard !isEncrypted || cipher != nil else {
+      throw NetworkAudioSecurityError.encryptionRequired
+    }
+    // Accepting plaintext while a key is configured would let anyone reaching the port bypass it.
+    guard isEncrypted || cipher == nil else {
+      throw NetworkAudioSecurityError.unexpectedPlaintext
+    }
     let sessionID = try cursor.readUUID()
     let sequence = try cursor.readInteger(as: UInt64.self)
     let sampleRateValue = try cursor.readInteger(as: UInt32.self)
@@ -296,21 +346,38 @@ public enum NetworkAudioPacketCodec {
         actual: payloadByteCount
       )
     }
-    guard cursor.remainingByteCount == payloadByteCount else {
-      if cursor.remainingByteCount < payloadByteCount {
+    let tagByteCount = isEncrypted ? NetworkAudioSessionCipher.tagByteCount : 0
+    guard cursor.remainingByteCount == payloadByteCount + tagByteCount else {
+      if cursor.remainingByteCount < payloadByteCount + tagByteCount {
         throw NetworkAudioPacketError.truncated
       }
       throw NetworkAudioPacketError.payloadSizeMismatch(
-        expected: payloadByteCount,
+        expected: payloadByteCount + tagByteCount,
         actual: cursor.remainingByteCount
       )
+    }
+    var payload = try cursor.readData(byteCount: payloadByteCount)
+    if let cipher {
+      let tag = try cursor.readData(byteCount: tagByteCount)
+      try payload.withUnsafeMutableBytes { plaintext in
+        try data.prefix(headerByteCount).withUnsafeBytes { header in
+          try tag.withUnsafeBytes { tagBytes in
+            try cipher.open(
+              payload: plaintext,
+              tag: tagBytes,
+              sequence: sequence,
+              authenticating: header
+            )
+          }
+        }
+      }
     }
     return try NetworkAudioPacket(
       sessionID: sessionID,
       sequence: sequence,
       format: format,
       frameCount: frameCount,
-      payload: try cursor.readData(byteCount: payloadByteCount)
+      payload: payload
     )
   }
 }

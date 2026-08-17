@@ -152,6 +152,9 @@ struct NetworkAudioPacketFuzzTests {
       return try NetworkAudioPacketCodec.decode(data)
     } catch is NetworkAudioPacketError {
       return nil
+    } catch is NetworkAudioSecurityError {
+      // Corrupting the flags can set the encrypted bit, which a decoder without a key refuses.
+      return nil
     } catch {
       Issue.record("Decoding produced an untyped error: \(error)")
       return nil
