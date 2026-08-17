@@ -381,6 +381,7 @@ public enum NetworkAudioPacketCodec {
             rebasing: destination[headerByteCount..<(headerByteCount + payloadByteCount)]
           ),
           sequence: sequence,
+          domain: .audio,
           authenticating: UnsafeRawBufferPointer(header)
         )
       })
@@ -505,6 +506,7 @@ public enum NetworkAudioPacketCodec {
               payload: plaintext,
               tag: tagBytes,
               sequence: sequence,
+              domain: .audio,
               authenticating: header
             )
           }
@@ -609,6 +611,7 @@ public enum NetworkAudioPacketCodec {
         count: payload.count + codecConfiguration.count
       ),
       sequence: sequence,
+      domain: .audio,
       authenticating: UnsafeRawBufferPointer(start: base, count: bodyOffset)
     )
     return bodyOffset + sealed

@@ -204,7 +204,7 @@ struct NetworkAudioSecurityTests {
       plaintext.copyBytes(to: storage.bindMemory(to: UInt8.self), count: plaintext.count)
       let payload = UnsafeMutableRawBufferPointer(rebasing: storage[..<plaintext.count])
       let written = try header.withUnsafeBytes {
-        try cipher.seal(payload: payload, sequence: sequence, authenticating: $0)
+        try cipher.seal(payload: payload, sequence: sequence, domain: .audio, authenticating: $0)
       }
       return Data(storage.prefix(written))
     }
@@ -226,6 +226,7 @@ struct NetworkAudioSecurityTests {
             payload: storage,
             tag: tagBytes,
             sequence: sequence,
+            domain: .audio,
             authenticating: headerBytes
           )
         }

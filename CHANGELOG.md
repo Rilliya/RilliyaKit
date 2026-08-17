@@ -64,8 +64,11 @@ version section with migration guidance.
 
 ### Breaking Changes
 
-- `NetworkAudioSessionCipher.seal` and `open` take a nonce domain. A caller that sealed anything
-  itself must pass `.audio`.
+- `NetworkAudioSessionCipher.seal`, `open`, and `NonceDomain` are no longer public. Sealing
+  correctly means naming the right nonce domain, and naming the wrong one silently reuses a nonce
+  under the session key, which produces no visible symptom and defeats the encryption entirely.
+  Nothing outside the module used them. Send a request through
+  `NetworkAudioRetransmissionRequest.encoded(cipher:)`, which names the domain for you.
 - The packet header's reserved word is no longer reserved. A sender and receiver from different
   builds do not interoperate; both sides must be updated together.
 

@@ -127,7 +127,10 @@ public struct NetworkAudioSessionCipher: Sendable {
   /// sequences are counted separately, so without a domain the two would eventually pick the same
   /// nonce under one key, which is the one thing AES-GCM does not survive. The domain occupies
   /// the four bytes ahead of the sequence, so the two spaces cannot meet.
-  public enum NonceDomain: UInt32, Equatable, Sendable {
+  ///
+  /// A new kind of message takes a new case. It must never reuse one, and the sealing methods
+  /// take the domain without a default so that adding one cannot silently land in this space.
+  enum NonceDomain: UInt32, Equatable, Sendable {
     /// A datagram carrying audio.
     case audio = 0
 
@@ -154,10 +157,10 @@ public struct NetworkAudioSessionCipher: Sendable {
   ///
   /// - Returns: the bytes written, which is the payload length plus the tag.
   @discardableResult
-  public func seal(
+  func seal(
     payload: UnsafeMutableRawBufferPointer,
     sequence: UInt64,
-    domain: NonceDomain = .audio,
+    domain: NonceDomain,
     authenticating header: UnsafeRawBufferPointer
   ) throws -> Int {
     guard let base = payload.baseAddress else {
@@ -183,11 +186,11 @@ public struct NetworkAudioSessionCipher: Sendable {
   }
 
   /// Decrypts a payload in place after checking its tag.
-  public func open(
+  func open(
     payload: UnsafeMutableRawBufferPointer,
     tag: UnsafeRawBufferPointer,
     sequence: UInt64,
-    domain: NonceDomain = .audio,
+    domain: NonceDomain,
     authenticating header: UnsafeRawBufferPointer
   ) throws {
     let box: AES.GCM.SealedBox
