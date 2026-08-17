@@ -204,4 +204,58 @@ struct AudioRealtimeWorkerTests {
     worker.stop()
     #expect(worker.schedulingDiagnostics() == nil)
   }
+
+  /// A worker whose thread cannot take the realtime policy has to say so.
+  ///
+  /// It deadlocked instead: `start()` waited for the new thread while holding the lock that
+  /// thread needed in order to record what had stopped it, so neither side could move and the
+  /// caller never returned. Nothing above it could recover, because a caller holding its own lock
+  /// across `start()` wedged that lock too.
+  ///
+  /// The call is made on a thread of its own with a bounded wait, so a return of the deadlock
+  /// fails this test instead of hanging the suite.
+  @Test("A worker that cannot take the realtime policy says so instead of hanging")
+  func startupFailureIsReportedRatherThanHung() throws {
+    // Ticks this far from the system's turn an ordinary budget into a computation no kernel
+    // accepts, which is the rejection a caller has to hear about.
+    let hostile = AudioRealtimeTimebase(numerator: 1, denominator: 7_158)
+    let worker = AudioRealtimeWorker(
+      label: "moe.uwucocoa.rilliya.test.hostile-timebase",
+      cadence: try Fixture.cadence(),
+      budget: try Fixture.budget(),
+      joinsAudioWorkgroup: false,
+      timebase: hostile
+    ) { _ in .continue }
+
+    let outcome = StartOutcome()
+    let finished = DispatchSemaphore(value: 0)
+    Thread.detachNewThread {
+      outcome.record { try worker.start() }
+      finished.signal()
+    }
+
+    let returned = finished.wait(timeout: .now() + 5)
+    #expect(returned == .success, "start() never returned, which is the deadlock")
+    guard returned == .success else { return }
+
+    #expect(outcome.thrown is AudioRealtimeWorkerError)
+    #expect(!worker.isRunning)
+    worker.stop()
+  }
+
+  /// Carries what `start()` did off the thread it was called on.
+  private final class StartOutcome: @unchecked Sendable {
+    private let lock = NSLock()
+    private var error: Error?
+
+    func record(_ body: () throws -> Void) {
+      do {
+        try body()
+      } catch {
+        lock.withLock { self.error = error }
+      }
+    }
+
+    var thrown: Error? { lock.withLock { error } }
+  }
 }

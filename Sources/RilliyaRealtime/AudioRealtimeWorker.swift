@@ -114,6 +114,11 @@ public final class AudioRealtimeWorker: @unchecked Sendable {
   private let machThread = ManagedAtomic<UInt32>(0)
   private let lock = NSLock()
   private var thread: pthread_t?
+  /// Guards the startup handoff on its own rather than sharing ``lock``.
+  ///
+  /// `start()` waits for the new thread while holding ``lock``, so a thread that needed ``lock``
+  /// to report why it could not start could never report it, and both sides would wait for ever.
+  private let startupLock = NSLock()
   private var startupError: AudioRealtimeWorkerError?
   private let startupSemaphore = DispatchSemaphore(value: 0)
 
@@ -150,7 +155,7 @@ public final class AudioRealtimeWorker: @unchecked Sendable {
     defer { lock.unlock() }
     guard thread == nil else { throw AudioRealtimeWorkerError.alreadyRunning }
     shouldStop.store(false, ordering: .relaxed)
-    startupError = nil
+    startupLock.withLock { startupError = nil }
 
     let context = Unmanaged.passRetained(self).toOpaque()
     let spawned = spawnAudioRealtimeThread(context: context)
@@ -160,9 +165,9 @@ public final class AudioRealtimeWorker: @unchecked Sendable {
     }
 
     startupSemaphore.wait()
-    if let startupError {
+    if let error = startupLock.withLock({ startupError }) {
       pthread_join(created, nil)
-      throw startupError
+      throw error
     }
     thread = created
   }
@@ -204,7 +209,7 @@ public final class AudioRealtimeWorker: @unchecked Sendable {
   fileprivate func run() {
     machThread.store(pthread_mach_thread_np(pthread_self()), ordering: .relaxed)
     if let error = applySchedulingPolicy() {
-      lock.withLock { startupError = error }
+      startupLock.withLock { startupError = error }
       startupSemaphore.signal()
       return
     }
@@ -215,7 +220,7 @@ public final class AudioRealtimeWorker: @unchecked Sendable {
       case .success(let joined):
         workgroup = joined
       case .failure(let error):
-        lock.withLock { startupError = error }
+        startupLock.withLock { startupError = error }
         startupSemaphore.signal()
         return
       }
