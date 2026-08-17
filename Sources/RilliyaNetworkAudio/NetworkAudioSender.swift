@@ -169,7 +169,7 @@ public struct NetworkAudioSenderConfiguration: Equatable, Hashable, Sendable {
   ///
   /// Ten milliseconds is where a codec stops paying much per packet for its own overhead without
   /// adding delay a listener notices. A codec offering nothing that short reports what it has.
-  static let preferredBlockMilliseconds = 10.0
+  public static let preferredBlockMilliseconds = 10.0
 
   /// The compressed bytes one packet may carry, which the datagram bound decides.
   var maximumCompressedPacketByteCount: Int {
