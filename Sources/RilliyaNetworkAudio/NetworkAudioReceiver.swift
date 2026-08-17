@@ -379,7 +379,9 @@ final class NetworkAudioPacketIngestor {
       channelCount: configuration.format.channelCount
     )
     reassembler = try NetworkAudioFragmentReassembler(
-      blockCount: 2,
+      // Room for a block behind the one arriving, so a piece that comes late — or comes back
+      // because it was asked for — still has its block to complete.
+      blockCount: 4,
       maximumFragmentByteCount: configuration.maximumDatagramByteCount
     )
     self.sampleCapacity = sampleCapacity

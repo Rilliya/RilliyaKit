@@ -106,10 +106,24 @@ public final class NetworkAudioFragmentReassembler {
       newestSequence = firstSequence
     }
 
-    let slot = Int(firstSequence % UInt64(blockCount))
-    if blocks[slot].isOccupied, blocks[slot].firstSequence != firstSequence {
-      // A newer block claims the slot; whatever was there never completed.
-      clear(slot)
+    // Chosen by searching rather than by `firstSequence % blockCount`: every block of a stream is
+    // the same number of pieces wide, so the starts share a factor with any fixed depth and a
+    // modulo would land them all in one slot however many there are.
+    let slot: Int
+    if let existing = blocks.indices.first(where: {
+      blocks[$0].isOccupied && blocks[$0].firstSequence == firstSequence
+    }) {
+      slot = existing
+    } else if let free = blocks.indices.first(where: { !blocks[$0].isOccupied }) {
+      slot = free
+    } else if let oldest = blocks.indices.min(by: {
+      blocks[$0].firstSequence < blocks[$1].firstSequence
+    }) {
+      // Every slot is holding a block, so the oldest is the one that never completed.
+      clear(oldest)
+      slot = oldest
+    } else {
+      return .tooLate
     }
     if !blocks[slot].isOccupied {
       blocks[slot] = Block(

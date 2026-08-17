@@ -314,6 +314,10 @@ struct NetworkAudioLosslessWireTests {
   }
 
   /// Losing one piece loses the block it belonged to, and nothing else.
+  ///
+  /// The whole block behind it waits rather than overtaking, because blocks leave in the order
+  /// they were sent. It leaves as soon as the stalled one is given up on — which is what keeps a
+  /// piece that is merely late, or on its way back because it was asked for, able to arrive.
   @Test("A block missing a piece is lost, and the stream carries on")
   func aLostPieceLosesOnlyItsBlock() throws {
     let harness = try Harness()
@@ -330,21 +334,55 @@ struct NetworkAudioLosslessWireTests {
       }
     }
 
-    #expect(completed == 1)
+    // Held behind the block that never completed.
+    #expect(completed == 0)
+    #expect(harness.reassembler.heldBlockCount == 2)
+
+    let released = harness.reassembler.abandonOldest()
+
+    #expect(released == [harness.joined(block)])
+    #expect(harness.reassembler.heldBlockCount == 0)
+  }
+
+  /// A piece that never comes must not hold every later block for ever, so the window itself is
+  /// the backstop: a block far enough ahead takes the oldest slot whatever is in it.
+  @Test("A stalled block is displaced once the window has moved past it")
+  func stalledBlockIsDisplacedByTheWindow() throws {
+    let harness = try Harness(blockCount: 2)
+    let block = harness.block(pieces: 4)
+
+    for index in [0, 1, 3] { _ = try harness.admit(block, index: index, of: 4, firstSequence: 0) }
+    for index in 0..<4 { _ = try harness.admit(block, index: index, of: 4, firstSequence: 4) }
+
+    var completed = 0
+    for index in 0..<4 {
+      if case .completed(let blocks) = try harness.admit(
+        block, index: index, of: 4, firstSequence: 8)
+      {
+        completed += blocks.count
+      }
+    }
+
+    // The stalled block is gone and both whole blocks behind it come out, oldest first.
+    #expect(completed == 2)
   }
 
   private final class Harness {
     let reassembler: NetworkAudioFragmentReassembler
 
-    init() throws {
+    init(blockCount: Int = 4) throws {
       reassembler = try NetworkAudioFragmentReassembler(
-        blockCount: 2,
+        blockCount: blockCount,
         maximumFragmentByteCount: 64
       )
     }
 
     func block(pieces: Int) -> [Data] {
       (0..<pieces).map { index in Data((0..<64).map { UInt8((index * 7 + $0) % 251) }) }
+    }
+
+    func joined(_ block: [Data]) -> Data {
+      block.reduce(into: Data()) { $0.append($1) }
     }
 
     func admit(
@@ -369,23 +407,25 @@ struct NetworkAudioBlockOrderTests {
   @Test("A block that finishes early waits for the one before it")
   func laterBlockWaits() throws {
     let harness = try Harness()
-    let block = harness.block(pieces: 2)
+    // Two blocks that do not look alike, or the order they come out in cannot be seen.
+    let first = harness.block(pieces: 2, seed: 1)
+    let second = harness.block(pieces: 2, seed: 200)
 
     // The second block completes while the first is still a piece short.
-    _ = try harness.admit(block, index: 0, of: 2, firstSequence: 0)
-    let early = try harness.admit(block, index: 0, of: 2, firstSequence: 2)
-    let stillEarly = try harness.admit(block, index: 1, of: 2, firstSequence: 2)
+    _ = try harness.admit(first, index: 0, of: 2, firstSequence: 0)
+    let early = try harness.admit(second, index: 0, of: 2, firstSequence: 2)
+    let stillEarly = try harness.admit(second, index: 1, of: 2, firstSequence: 2)
 
     #expect(early == .held)
     #expect(stillEarly == .held)
 
     // Completing the first releases both, oldest first.
-    let outcome = try harness.admit(block, index: 1, of: 2, firstSequence: 0)
+    let outcome = try harness.admit(first, index: 1, of: 2, firstSequence: 0)
     guard case .completed(let released) = outcome else {
       Issue.record("the first block did not release both")
       return
     }
-    #expect(released.count == 2)
+    #expect(released == [harness.joined(first), harness.joined(second)])
   }
 
   /// A block whose piece never arrives would otherwise hold every later block behind it.
@@ -421,8 +461,16 @@ struct NetworkAudioBlockOrderTests {
       )
     }
 
-    func block(pieces: Int) -> [Data] {
-      (0..<pieces).map { index in Data((0..<64).map { UInt8((index * 7 + $0) % 251) }) }
+    /// `seed` makes one block distinguishable from another, so the order they leave in is
+    /// something a test can actually see.
+    func block(pieces: Int, seed: Int = 0) -> [Data] {
+      (0..<pieces).map { index in
+        Data((0..<64).map { UInt8((seed &* 31 &+ index &* 7 &+ $0) % 251) })
+      }
+    }
+
+    func joined(_ block: [Data]) -> Data {
+      block.reduce(into: Data()) { $0.append($1) }
     }
 
     func admit(
