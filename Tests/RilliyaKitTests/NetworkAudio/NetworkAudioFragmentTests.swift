@@ -400,6 +400,130 @@ struct NetworkAudioLosslessWireTests {
   }
 }
 
+/// What the sender actually puts on the wire for a split block.
+///
+/// The suites above build their own datagrams, so the sender's own splitting had never been run
+/// by a test. This drives the real sender at a plain socket and reads what comes out.
+@Suite("Network audio lossless datagrams", .serialized)
+struct NetworkAudioLosslessDatagramTests {
+  /// A codec that needs a configuration produces nothing without one.
+  ///
+  /// Losing the single piece that used to carry it meant a listener had no way to decode anything
+  /// until the next block — or for the whole session, if that piece kept going missing. The room
+  /// for it is reserved on every piece either way, so carrying it on every piece costs nothing
+  /// that was not already spent.
+  @Test("Every piece of a lossless block carries the codec configuration")
+  func everyPieceCarriesTheConfiguration() async throws {
+    let port: UInt16 = 49_412
+    let listener = try UDPCapture(port: port)
+    defer { listener.stop() }
+
+    let format = try NetworkAudioStreamFormat(sampleRate: 48_000, channelCount: 2)
+    let sender = try NetworkAudioSender(
+      configuration: NetworkAudioSenderConfiguration(
+        host: "127.0.0.1",
+        port: port,
+        format: format,
+        encoding: .appleLossless
+      )
+    )
+    try sender.start()
+    defer { Task { await sender.stop() } }
+
+    // Enough blocks that a whole one is split and sent.
+    let quantum = 512
+    var left = [Float](repeating: 0, count: quantum)
+    var right = [Float](repeating: 0, count: quantum)
+    var phase = 0.0
+    for _ in 0..<40 {
+      for frame in 0..<quantum {
+        let value = Float(0.25 * sin(phase))
+        left[frame] = value
+        right[frame] = value
+        phase += 2 * .pi * 440 / 48_000
+      }
+      left.withUnsafeBufferPointer { l in
+        right.withUnsafeBufferPointer { r in
+          guard let lb = l.baseAddress, let rb = r.baseAddress else { return }
+          [lb, rb].withUnsafeBufferPointer { channels in
+            _ = sender.frameBuffer.writePlanar(channels, frameCount: quantum)
+          }
+        }
+      }
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    try await Task.sleep(for: .milliseconds(300))
+
+    let datagrams = listener.collected()
+    let packets = datagrams.compactMap { try? NetworkAudioPacketCodec.decode($0) }
+    let pieces = packets.filter { $0.fragment != nil }
+
+    #expect(pieces.count > 5, "the block was not split; nothing to check")
+    #expect(pieces.allSatisfy { $0.fragment?.count ?? 0 > 1 })
+    // The point: not only the opening piece.
+    let later = pieces.filter { ($0.fragment?.index ?? 0) > 0 }
+    #expect(!later.isEmpty)
+    #expect(
+      later.allSatisfy { !$0.codecConfiguration.isEmpty },
+      "a piece after the first carried no configuration"
+    )
+  }
+
+  /// Reads whatever arrives on a port without interpreting it.
+  private final class UDPCapture: @unchecked Sendable {
+    private let descriptor: Int32
+    private let lock = NSLock()
+    private var datagrams: [Data] = []
+    private var source: DispatchSourceRead?
+
+    init(port: UInt16) throws {
+      descriptor = socket(AF_INET, SOCK_DGRAM, 0)
+      guard descriptor >= 0 else { throw UDPCaptureError.unavailable }
+      var reuse: Int32 = 1
+      setsockopt(
+        descriptor, SOL_SOCKET, SO_REUSEADDR, &reuse, socklen_t(MemoryLayout<Int32>.size))
+      var address = sockaddr_in()
+      address.sin_family = sa_family_t(AF_INET)
+      address.sin_port = port.bigEndian
+      address.sin_addr.s_addr = INADDR_ANY
+      let bound = withUnsafePointer(to: &address) {
+        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+          bind(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+        }
+      }
+      guard bound == 0 else {
+        Darwin.close(descriptor)
+        throw UDPCaptureError.unavailable
+      }
+      // Armed after every stored property is set, so the handler may capture `self`.
+      let reader = descriptor
+      let reading = DispatchSource.makeReadSource(fileDescriptor: reader, queue: .global())
+      reading.setEventHandler { [weak self] in
+        var buffer = [UInt8](repeating: 0, count: 4_096)
+        let count = recv(reader, &buffer, buffer.count, 0)
+        guard count > 0, let self else { return }
+        self.append(Data(buffer.prefix(count)))
+      }
+      source = reading
+      reading.resume()
+    }
+
+    private func append(_ datagram: Data) {
+      lock.withLock { datagrams.append(datagram) }
+    }
+
+    func collected() -> [Data] { lock.withLock { datagrams } }
+
+    func stop() {
+      source?.cancel()
+      source = nil
+      Darwin.close(descriptor)
+    }
+  }
+
+  private enum UDPCaptureError: Error { case unavailable }
+}
+
 /// Blocks leave in the order they were sent, not the order they finish arriving, which is what
 /// makes a further reorder stage unnecessary for a split stream.
 @Suite("Network audio block ordering")

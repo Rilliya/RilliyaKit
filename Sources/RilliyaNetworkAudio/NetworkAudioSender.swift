@@ -723,7 +723,10 @@ private final class NetworkAudioSenderPacketizer: @unchecked Sendable {
     for index in 0..<pieceCount {
       let start = index * room
       let length = min(room, byteCount - start)
-      // The configuration rides the first piece, so a decoder has it before the block completes.
+      // The configuration rides every piece. `room` above already reserves its bytes on all of
+      // them, so repeating it costs nothing that was not already spent — and a receiver that
+      // missed the piece it used to ride alone had no way to decode anything until the next
+      // block, or for the whole session if that piece kept going missing.
       let written = try NetworkAudioPacketCodec.encode(
         sessionID: sessionID,
         sequence: sequence,
@@ -732,7 +735,7 @@ private final class NetworkAudioSenderPacketizer: @unchecked Sendable {
         encoding: configuration.encoding,
         payload: UnsafeRawBufferPointer(
           rebasing: compression.packet[start..<(start + length)]),
-        codecConfiguration: index == 0 ? configurationBytes : Data(),
+        codecConfiguration: configurationBytes,
         fragment: pieceCount > 1
           ? try NetworkAudioPacketFragment(index: index, count: pieceCount) : nil,
         into: datagram,

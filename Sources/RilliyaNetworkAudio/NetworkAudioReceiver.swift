@@ -160,6 +160,13 @@ public struct NetworkAudioReceiverStatistics: Equatable, Sendable {
   /// Packets that arrived because they were asked for.
   public let retransmissionRecoveredCount: UInt64
 
+  /// Blocks that arrived whole and still could not be turned into audio.
+  ///
+  /// A codec this system no longer installs, or one whose sender has not yet sent the
+  /// configuration it needs. Either produces silence, so this is what tells the two apart from a
+  /// sender that simply stopped.
+  public let undecodablePacketCount: UInt64
+
   /// Current bounded PCM queue diagnostics.
   public let frameBuffer: AudioRealtimeFrameBufferStatistics
 }
@@ -361,6 +368,7 @@ final class NetworkAudioPacketIngestor {
   private var requestSequence: UInt64 = 0
   private var retransmissionRequestCount: UInt64 = 0
   private var retransmissionRecoveredCount: UInt64 = 0
+  private var undecodablePacketCount: UInt64 = 0
   private var lastAcceptedTime: UInt64 = 0
 
   init(
@@ -529,6 +537,7 @@ final class NetworkAudioPacketIngestor {
         missingPacketCount: missingPacketCount,
         retransmissionRequestCount: retransmissionRequestCount,
         retransmissionRecoveredCount: retransmissionRecoveredCount,
+        undecodablePacketCount: undecodablePacketCount,
         frameBuffer: frameBuffer.statistics()
       )
     }
@@ -592,10 +601,22 @@ final class NetworkAudioPacketIngestor {
         )
       }
     }
-    guard let decoder, packet.frameCount <= maximumFrameCount else { return nil }
-    return try? block.withUnsafeBytes { bytes in
-      try decoder.decode(packet: bytes, into: interleavedStorage)
+    guard let decoder, packet.frameCount <= maximumFrameCount else {
+      // Counted rather than passed over. A format whose decoder cannot be built — a codec this
+      // system no longer installs, or one still waiting for the configuration its sender sends
+      // alongside the audio — otherwise produces silence with nothing anywhere to say why.
+      increment(\Self.undecodablePacketCount)
+      return nil
     }
+    guard
+      let frames = try? block.withUnsafeBytes({ bytes in
+        try decoder.decode(packet: bytes, into: interleavedStorage)
+      })
+    else {
+      increment(\Self.undecodablePacketCount)
+      return nil
+    }
+    return frames
   }
 
   /// Drops the decoder along with everything else the previous session left behind.
