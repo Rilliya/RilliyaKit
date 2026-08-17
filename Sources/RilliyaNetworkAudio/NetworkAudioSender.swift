@@ -110,7 +110,7 @@ public struct NetworkAudioSenderConfiguration: Equatable, Hashable, Sendable {
       } else {
         self.framesPerPacket = maximumFrames
       }
-    case .opus, .aacEnhancedLowDelay, .aacLowDelay:
+    case .opus, .aacEnhancedLowDelay, .aacLowDelay, .appleLossless:
       // A compressed block costs what the encoder makes of it, so the datagram no longer decides
       // the length: the codec does, and each defines only a handful.
       guard let codec = NetworkAudioCodec.codec(for: encoding) else {
@@ -512,7 +512,7 @@ private final class NetworkAudioSenderPacketizer: @unchecked Sendable {
     } catch {
       return
     }
-    guard let base = datagram.baseAddress else { return }
+    guard written > 0, let base = datagram.baseAddress else { return }
     sequence &+= 1
     connection.send(
       content: Data(bytes: base, count: written),
@@ -530,6 +530,9 @@ private final class NetworkAudioSenderPacketizer: @unchecked Sendable {
     }
     let byteCount = try compression.encoder.encode(
       input: compression.interleaved, into: compression.packet)
+    // A codec still filling produces no packet from this block, so there is nothing to send and
+    // the sequence must not move on without one.
+    guard byteCount > 0 else { return 0 }
     return try NetworkAudioPacketCodec.encode(
       sessionID: configuration.sessionID,
       sequence: sequence,

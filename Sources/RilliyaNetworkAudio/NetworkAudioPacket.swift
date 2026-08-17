@@ -42,6 +42,9 @@ public enum NetworkAudioWireEncoding: UInt8, Equatable, Hashable, Sendable, Case
   /// One AAC Low Delay packet.
   case aacLowDelay = 4
 
+  /// One Apple Lossless packet, which returns every sample exactly.
+  case appleLossless = 5
+
   /// Whether a payload of `byteCount` bytes can carry `frameCount` frames of this format.
   func carries(payloadByteCount: Int, channelCount: Int, frameCount: Int) -> Bool {
     switch self {
@@ -52,7 +55,7 @@ public enum NetworkAudioWireEncoding: UInt8, Equatable, Hashable, Sendable, Case
         by: MemoryLayout<Float>.stride)
       guard !bytes.overflow else { return false }
       return payloadByteCount == bytes.partialValue
-    case .opus, .aacEnhancedLowDelay, .aacLowDelay:
+    case .opus, .aacEnhancedLowDelay, .aacLowDelay, .appleLossless:
       return (1...NetworkAudioCodec.maximumPacketByteCount).contains(payloadByteCount)
     }
   }
@@ -78,6 +81,12 @@ public struct NetworkAudioPacket: Equatable, Sendable {
   /// The payload, as ``encoding`` describes it.
   public let payload: Data
 
+  /// The sender's codec configuration, when this packet is one of those carrying it.
+  ///
+  /// A codec that needs one produces nothing until it arrives, so a sender repeats it rather
+  /// than sending it once and hoping.
+  public let codecConfiguration: Data
+
   /// Creates a packet after validating that its payload can carry what it claims.
   public init(
     sessionID: UUID,
@@ -85,7 +94,8 @@ public struct NetworkAudioPacket: Equatable, Sendable {
     format: NetworkAudioStreamFormat,
     frameCount: Int,
     payload: Data,
-    encoding: NetworkAudioWireEncoding = .interleavedFloat32
+    encoding: NetworkAudioWireEncoding = .interleavedFloat32,
+    codecConfiguration: Data = Data()
   ) throws {
     guard frameCount > 0 else {
       throw NetworkAudioPacketError.invalidFrameCount(frameCount)
@@ -111,8 +121,15 @@ public struct NetworkAudioPacket: Equatable, Sendable {
     self.sequence = sequence
     self.format = format
     self.frameCount = frameCount
+    guard codecConfiguration.count <= NetworkAudioCodec.maximumConfigurationByteCount else {
+      throw NetworkAudioPacketError.payloadSizeMismatch(
+        expected: NetworkAudioCodec.maximumConfigurationByteCount,
+        actual: codecConfiguration.count
+      )
+    }
     self.payload = payload
     self.encoding = encoding
+    self.codecConfiguration = codecConfiguration
   }
 
   private static func payloadByteCount(channelCount: Int, frameCount: Int) throws -> Int {
@@ -370,7 +387,10 @@ public enum NetworkAudioPacketCodec {
     let channelCount = Int(try cursor.readInteger(as: UInt16.self))
     let frameCount = Int(try cursor.readInteger(as: UInt16.self))
     let payloadByteCount = Int(try cursor.readInteger(as: UInt32.self))
-    _ = try cursor.readInteger(as: UInt32.self)
+    let configurationByteCount = Int(try cursor.readInteger(as: UInt32.self))
+    guard configurationByteCount <= NetworkAudioCodec.maximumConfigurationByteCount else {
+      throw NetworkAudioPacketError.datagramTooLarge
+    }
 
     let format = try NetworkAudioStreamFormat(
       sampleRate: Double(sampleRateValue),
@@ -392,19 +412,22 @@ public enum NetworkAudioPacketCodec {
       )
     }
     let tagByteCount = isEncrypted ? NetworkAudioSessionCipher.tagByteCount : 0
-    guard cursor.remainingByteCount == payloadByteCount + tagByteCount else {
-      if cursor.remainingByteCount < payloadByteCount + tagByteCount {
+    let sealedByteCount = payloadByteCount + configurationByteCount
+    guard cursor.remainingByteCount == sealedByteCount + tagByteCount else {
+      if cursor.remainingByteCount < sealedByteCount + tagByteCount {
         throw NetworkAudioPacketError.truncated
       }
       throw NetworkAudioPacketError.payloadSizeMismatch(
-        expected: payloadByteCount + tagByteCount,
+        expected: sealedByteCount + tagByteCount,
         actual: cursor.remainingByteCount
       )
     }
-    var payload = try cursor.readData(byteCount: payloadByteCount)
+    // The configuration sits behind the payload and inside the seal, so a keyed stream cannot be
+    // told to read a configuration nobody sent.
+    var sealed = try cursor.readData(byteCount: sealedByteCount)
     if let cipher {
       let tag = try cursor.readData(byteCount: tagByteCount)
-      try payload.withUnsafeMutableBytes { plaintext in
+      try sealed.withUnsafeMutableBytes { plaintext in
         try data.prefix(headerByteCount).withUnsafeBytes { header in
           try tag.withUnsafeBytes { tagBytes in
             try cipher.open(
@@ -422,8 +445,9 @@ public enum NetworkAudioPacketCodec {
       sequence: sequence,
       format: format,
       frameCount: frameCount,
-      payload: payload,
-      encoding: encoding
+      payload: sealed.prefix(payloadByteCount),
+      encoding: encoding,
+      codecConfiguration: Data(sealed.dropFirst(payloadByteCount))
     )
   }
 
@@ -440,6 +464,7 @@ public enum NetworkAudioPacketCodec {
     frameCount: Int,
     encoding: NetworkAudioWireEncoding,
     payload: UnsafeRawBufferPointer,
+    codecConfiguration: Data = Data(),
     into destination: UnsafeMutableRawBufferPointer,
     cipher: NetworkAudioSessionCipher? = nil
   ) throws -> Int {
@@ -455,8 +480,12 @@ public enum NetworkAudioPacketCodec {
     else {
       throw NetworkAudioPacketError.payloadSizeMismatch(expected: 0, actual: payload.count)
     }
+    guard codecConfiguration.count <= NetworkAudioCodec.maximumConfigurationByteCount else {
+      throw NetworkAudioPacketError.datagramTooLarge
+    }
     let tagByteCount = cipher == nil ? 0 : NetworkAudioSessionCipher.tagByteCount
-    let datagramByteCount = headerByteCount + payload.count + tagByteCount
+    let datagramByteCount =
+      headerByteCount + payload.count + codecConfiguration.count + tagByteCount
     guard datagramByteCount <= maximumDatagramByteCount,
       destination.count >= datagramByteCount,
       let base = destination.baseAddress
@@ -475,14 +504,22 @@ public enum NetworkAudioPacketCodec {
     cursor.appendInteger(UInt16(format.channelCount))
     cursor.appendInteger(UInt16(frameCount))
     cursor.appendInteger(UInt32(payload.count))
-    cursor.appendInteger(UInt32(0))
+    cursor.appendInteger(UInt32(codecConfiguration.count))
 
     base.advanced(by: headerByteCount).copyMemory(from: source, byteCount: payload.count)
+    // The configuration follows the payload, so the payload's offset stays a constant.
+    if !codecConfiguration.isEmpty {
+      codecConfiguration.withUnsafeBytes { bytes in
+        guard let start = bytes.baseAddress else { return }
+        base.advanced(by: headerByteCount + payload.count)
+          .copyMemory(from: start, byteCount: codecConfiguration.count)
+      }
+    }
     guard let cipher else { return datagramByteCount }
     let sealed = try cipher.seal(
       payload: UnsafeMutableRawBufferPointer(
         start: base.advanced(by: headerByteCount),
-        count: payload.count
+        count: payload.count + codecConfiguration.count
       ),
       sequence: sequence,
       authenticating: UnsafeRawBufferPointer(start: base, count: headerByteCount)

@@ -25,6 +25,9 @@ public enum NetworkAudioCodecError: Error, Equatable, Sendable {
 
   /// The compressed packet is larger than any this codec produces.
   case oversizedPacket(Int)
+
+  /// This codec cannot read anything until the encoder's configuration arrives.
+  case missingConfiguration
 }
 
 extension NetworkAudioCodecError: LocalizedError {
@@ -45,6 +48,8 @@ extension NetworkAudioCodecError: LocalizedError {
       "The system could not code this block (\(status))."
     case .oversizedPacket(let byteCount):
       "A packet of \(byteCount) bytes is larger than this wire format produces."
+    case .missingConfiguration:
+      "This wire format cannot be read until the sender's codec configuration arrives."
     }
   }
 }
@@ -52,10 +57,15 @@ extension NetworkAudioCodecError: LocalizedError {
 /// One compressed representation the system can both produce and read.
 ///
 /// What a codec costs in delay is the block it insists on: a packet cannot be sent until its
-/// whole block exists, so the block length is a floor under the latency of the whole path. That
-/// is why the lossless codecs the system offers are absent here — Apple Lossless packs 4096
-/// frames and FLAC 4608, which is eighty-five and ninety-six milliseconds of delay before a
-/// packet even leaves.
+/// whole block exists, so the block length is a floor under the latency of the whole path. Opus
+/// packs 2.5 milliseconds, the low-delay AAC profiles 10.7, and Apple Lossless 85, which is why
+/// the last suits listening rather than monitoring and is offered as a choice rather than a
+/// default.
+///
+/// The system's lossless codecs are absent for two different reasons, both measured. FLAC does
+/// not return every sample exactly through this float path, so calling it lossless would be
+/// untrue. Apple Lossless does — but one of its blocks is about twenty datagrams wide, and
+/// losing any one of them loses the whole block.
 public struct NetworkAudioCodec: Equatable, Hashable, Sendable {
   /// The value this codec writes into a datagram's encoding byte.
   public let encoding: NetworkAudioWireEncoding
@@ -66,6 +76,16 @@ public struct NetworkAudioCodec: Equatable, Hashable, Sendable {
   /// Whether the encoder takes a bit rate.
   public let usesBitRate: Bool
 
+  /// Whether a decoder needs the encoder's own configuration before it can read anything.
+  ///
+  /// Opus and the AAC profiles carry everything a decoder needs in the packet. Apple Lossless
+  /// does not: without the configuration its encoder settled on, a decoder produces nothing at
+  /// all, so that configuration has to cross the network too.
+  public let needsConfiguration: Bool
+
+  /// Whether every sample comes back exactly as it was sent.
+  public let isLossless: Bool
+
   /// The largest compressed packet any of these codecs is allowed to produce.
   public static let maximumPacketByteCount = 4_000
 
@@ -73,25 +93,57 @@ public struct NetworkAudioCodec: Equatable, Hashable, Sendable {
   public static let opus = NetworkAudioCodec(
     encoding: .opus,
     formatID: kAudioFormatOpus,
-    usesBitRate: true
+    usesBitRate: true,
+    needsConfiguration: false,
+    isLossless: false
   )
 
   /// AAC Enhanced Low Delay, which carries 44.1 kHz where Opus does not.
   public static let aacEnhancedLowDelay = NetworkAudioCodec(
     encoding: .aacEnhancedLowDelay,
     formatID: kAudioFormatMPEG4AAC_ELD,
-    usesBitRate: true
+    usesBitRate: true,
+    needsConfiguration: false,
+    isLossless: false
   )
 
   /// AAC Low Delay, the plainer of the two low-delay AAC profiles.
   public static let aacLowDelay = NetworkAudioCodec(
     encoding: .aacLowDelay,
     formatID: kAudioFormatMPEG4AAC_LD,
-    usesBitRate: true
+    usesBitRate: true,
+    needsConfiguration: false,
+    isLossless: false
+  )
+
+  /// Apple Lossless, which returns every sample exactly but does not fit in a datagram.
+  ///
+  /// Measured here it packs 4096 frames into about 23,000 bytes on music-like content, against a
+  /// datagram this protocol keeps at 1,200 to stay under every path's limit. One block would
+  /// therefore have to be split across some twenty datagrams, and losing any one of them loses
+  /// all eighty-five milliseconds: on a link dropping one packet in a hundred that is a fifth of
+  /// all audio gone, which is far worse than anything a lossy codec does.
+  ///
+  /// It is defined but not offered. Re-enter it in ``all`` once datagrams are reassembled.
+  public static let appleLossless = NetworkAudioCodec(
+    encoding: .appleLossless,
+    formatID: kAudioFormatAppleLossless,
+    usesBitRate: false,
+    needsConfiguration: true,
+    isLossless: true
   )
 
   /// Every compressed format this wire protocol carries.
+  ///
+  /// ``appleLossless`` is absent because one of its blocks does not fit in a datagram; see its
+  /// documentation.
   public static let all: [NetworkAudioCodec] = [opus, aacEnhancedLowDelay, aacLowDelay]
+
+  /// The largest configuration any of these codecs produces.
+  ///
+  /// Apple Lossless reports 24 bytes on this machine; the bound is generous so a later system
+  /// reporting more is refused rather than truncated.
+  public static let maximumConfigurationByteCount = 256
 
   /// The codec a datagram's encoding byte names, or `nil` when it names no compression.
   public static func codec(for encoding: NetworkAudioWireEncoding) -> NetworkAudioCodec? {
@@ -159,6 +211,12 @@ final class NetworkAudioCodecCapabilities: @unchecked Sendable {
 
   /// The channel counts worth asking about, being the ones a routing graph offers.
   private static let candidateChannelCounts = [1, 2, 4, 6, 8]
+
+  /// The rates worth asking about when a codec says it accepts any.
+  private static let candidateSampleRates: [Double] = [
+    8_000, 11_025, 12_000, 16_000, 22_050, 24_000, 32_000, 44_100, 48_000, 88_200, 96_000,
+    176_400, 192_000,
+  ]
 
   private let lock = NSLock()
   private var sampleRatesByFormat: [AudioFormatID: [Double]] = [:]
@@ -238,8 +296,13 @@ final class NetworkAudioCodecCapabilities: @unchecked Sendable {
         &ranges
       ) == noErr
     else { return [] }
-    // Every format here reports discrete rates rather than ranges.
-    return ranges.filter { $0.mMinimum == $0.mMaximum }.map(\.mMinimum).sorted()
+    // A codec that constrains nothing reports one empty range rather than a list, so the
+    // question is put again as whether a block length exists at each rate a caller might use.
+    let discrete = ranges.filter { $0.mMinimum == $0.mMaximum && $0.mMinimum > 0 }
+    if !discrete.isEmpty { return discrete.map(\.mMinimum).sorted() }
+    return candidateSampleRates.filter {
+      queryFrameCountPerPacket(formatID: formatID, sampleRate: $0, channelCount: 2) != nil
+    }
   }
 
   private static func queryFrameCountPerPacket(
@@ -281,6 +344,11 @@ public final class NetworkAudioCompressedEncoder: @unchecked Sendable {
 
   /// The frames one packet carries.
   public let frameCountPerPacket: Int
+
+  /// The configuration a decoder needs before it can read this encoder's packets.
+  ///
+  /// Empty for a codec that needs none.
+  public private(set) var configuration = Data()
 
   private let converter: AudioConverterRef
   private let source: Source
@@ -341,6 +409,12 @@ public final class NetworkAudioCompressedEncoder: @unchecked Sendable {
     inputStorage = .allocate(capacity: frameCountPerPacket * channelCount)
     inputStorage.initialize(repeating: 0, count: frameCountPerPacket * channelCount)
     source = Source(storage: inputStorage, channelCount: channelCount)
+    if codec.needsConfiguration {
+      configuration = Self.readConfiguration(from: created)
+      guard !configuration.isEmpty else {
+        throw NetworkAudioCodecError.unavailable(kAudioConverterErr_PropertyNotSupported)
+      }
+    }
   }
 
   deinit {
@@ -349,12 +423,31 @@ public final class NetworkAudioCompressedEncoder: @unchecked Sendable {
     inputStorage.deallocate()
   }
 
+  /// The configuration the system's encoder settled on, which a decoder cannot infer.
+  private static func readConfiguration(from converter: AudioConverterRef) -> Data {
+    var size: UInt32 = 0
+    guard
+      AudioConverterGetPropertyInfo(
+        converter, kAudioConverterCompressionMagicCookie, &size, nil) == noErr,
+      size > 0, size <= UInt32(NetworkAudioCodec.maximumConfigurationByteCount)
+    else { return Data() }
+    var bytes = [UInt8](repeating: 0, count: Int(size))
+    guard
+      AudioConverterGetProperty(
+        converter, kAudioConverterCompressionMagicCookie, &size, &bytes) == noErr
+    else { return Data() }
+    return Data(bytes.prefix(Int(size)))
+  }
+
   /// Compresses one block into `packet`.
   ///
   /// - Parameters:
   ///   - input: interleaved samples, ``frameCountPerPacket`` frames of them.
   ///   - packet: where the compressed bytes are written.
-  /// - Returns: the bytes written.
+  /// A codec that fills before it emits produces no packet from its opening blocks. That is
+  /// reported as zero bytes rather than an error, and the caller sends nothing that turn.
+  ///
+  /// - Returns: the bytes written, or zero when this block produced no packet.
   /// - Throws: ``NetworkAudioCodecError`` when the system refuses the block.
   public func encode(
     input: UnsafePointer<Float>,
@@ -387,9 +480,10 @@ public final class NetworkAudioCompressedEncoder: @unchecked Sendable {
         &description
       )
     }
-    guard status == noErr || status == NetworkAudioCodecSupply.noDataNow, packetCount == 1 else {
+    guard status == noErr || status == NetworkAudioCodecSupply.noDataNow else {
       throw NetworkAudioCodecError.failed(status)
     }
+    guard packetCount == 1 else { return 0 }
     // A codec with a variable packet size reports it in the description rather than the buffer.
     let described = Int(description.mDataByteSize)
     return described > 0 ? described : Int(list.mBuffers.mDataByteSize)
@@ -432,10 +526,14 @@ public final class NetworkAudioCompressedDecoder: @unchecked Sendable {
     codec: NetworkAudioCodec,
     sampleRate: Double,
     channelCount: Int,
-    frameCountPerPacket: Int
+    frameCountPerPacket: Int,
+    configuration: Data = Data()
   ) throws {
     guard codec.supportedSampleRates.contains(sampleRate) else {
       throw NetworkAudioCodecError.unsupportedSampleRate(sampleRate)
+    }
+    guard !codec.needsConfiguration || !configuration.isEmpty else {
+      throw NetworkAudioCodecError.missingConfiguration
     }
     guard codec.supportedChannelCounts.contains(channelCount) else {
       throw NetworkAudioCodecError.unsupportedChannelCount(channelCount)
@@ -465,6 +563,19 @@ public final class NetworkAudioCompressedDecoder: @unchecked Sendable {
     self.channelCount = channelCount
     self.frameCountPerPacket = frameCountPerPacket
     converter = created
+    if !configuration.isEmpty {
+      var bytes = [UInt8](configuration)
+      let status = AudioConverterSetProperty(
+        created,
+        kAudioConverterDecompressionMagicCookie,
+        UInt32(bytes.count),
+        &bytes
+      )
+      guard status == noErr else {
+        AudioConverterDispose(created)
+        throw NetworkAudioCodecError.unavailable(status)
+      }
+    }
     packetStorage = .allocate(
       byteCount: NetworkAudioCodec.maximumPacketByteCount,
       alignment: 16

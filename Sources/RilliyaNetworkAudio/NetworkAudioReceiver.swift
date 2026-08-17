@@ -394,7 +394,7 @@ final class NetworkAudioPacketIngestor {
     case .interleavedFloat32:
       decodePayload(packet.payload)
       decodedFrameCount = packet.frameCount
-    case .opus, .aacEnhancedLowDelay, .aacLowDelay:
+    case .opus, .aacEnhancedLowDelay, .aacLowDelay, .appleLossless:
       guard let frames = decodeCompressed(packet) else {
         increment(\Self.rejectedPacketCount)
         return .rejected

@@ -442,12 +442,20 @@ struct NetworkAudioCodecSuiteTests {
           bitRate: 128_000
         )
       }
+      let encoder = try NetworkAudioCompressedEncoder(
+        codec: codec,
+        sampleRate: rate,
+        channelCount: channels,
+        frameCountPerPacket: frames,
+        bitRate: 128_000
+      )
       #expect(throws: Never.self) {
         _ = try NetworkAudioCompressedDecoder(
           codec: codec,
           sampleRate: rate,
           channelCount: channels,
-          frameCountPerPacket: frames
+          frameCountPerPacket: frames,
+          configuration: encoder.configuration
         )
       }
     }
@@ -473,24 +481,130 @@ struct NetworkAudioCodecSuiteTests {
   func everyCodecStaysBounded() throws {
     for codec in Self.codecs {
       let harness = try Harness(codec: codec)
+      var produced = 0
       for block in 0..<24 {
         let byteCount = try harness.encodeBlock(block)
-        #expect(byteCount > 0)
         #expect(byteCount <= NetworkAudioCodec.maximumPacketByteCount)
+        if byteCount > 0 { produced += 1 }
       }
+      // A codec that fills first still has to produce most of what it was given.
+      #expect(produced >= 20, "\(codec.encoding) produced only \(produced) packets from 24")
     }
   }
 
-  /// A block length is a floor under the delay of the whole path, so it is part of what a codec
-  /// promises.
-  @Test("Every codec offers a block short enough for live audio")
-  func everyCodecIsShortEnoughForLiveAudio() throws {
+  /// A block length is a floor under the delay of the whole path, so what each codec insists on
+  /// is part of what choosing it means.
+  @Test("Every codec offered packs a block short enough for live audio")
+  func blockLengthsAreWhatTheyClaim() throws {
     for codec in Self.codecs {
       let frames = try #require(
         codec.frameCount(nearestTo: 10, sampleRate: 48_000, channelCount: 2))
       let milliseconds = Double(frames) / 48_000 * 1_000
       #expect(milliseconds <= 25, "\(codec.encoding) packs \(milliseconds) ms per packet")
     }
+  }
+
+  /// Apple Lossless is defined but not offered.
+  ///
+  /// One of its blocks is about twenty datagrams wide and losing any one of them loses the whole
+  /// block. This holds the measurement that decided it, so the decision is checked rather than
+  /// remembered.
+  @Test("A lossless block is far wider than a datagram, which is why it is not offered")
+  func losslessDoesNotFitADatagram() throws {
+    let codec = NetworkAudioCodec.appleLossless
+    #expect(!NetworkAudioCodec.all.contains(codec))
+
+    let frames = try #require(
+      codec.frameCount(nearestTo: 10, sampleRate: 48_000, channelCount: 2))
+    // Even at the ratio a lossless codec achieves, one block dwarfs what a datagram carries.
+    let uncompressedBytes = frames * 2 * MemoryLayout<Float>.stride
+    let plausibleCompressed = uncompressedBytes / 2
+    #expect(
+      plausibleCompressed > NetworkAudioSenderConfiguration.defaultMaximumDatagramByteCount * 5)
+  }
+
+  /// A codec that cannot read anything without the sender's configuration must say so rather
+  /// than build and then produce silence.
+  @Test("A decoder that needs a configuration refuses to be built without one")
+  func missingConfigurationIsRefused() throws {
+    let codec = NetworkAudioCodec.appleLossless
+    let frames = try #require(
+      codec.frameCount(nearestTo: 10, sampleRate: 48_000, channelCount: 2))
+
+    #expect(throws: NetworkAudioCodecError.missingConfiguration) {
+      _ = try NetworkAudioCompressedDecoder(
+        codec: codec,
+        sampleRate: 48_000,
+        channelCount: 2,
+        frameCountPerPacket: frames
+      )
+    }
+  }
+
+  /// The point of a lossless codec is that it is lossless, which only a sample-for-sample
+  /// comparison shows.
+  @Test("The lossless codec returns every sample exactly")
+  func losslessReturnsEverySampleExactly() throws {
+    let codec = NetworkAudioCodec.appleLossless
+    let frames = try #require(
+      codec.frameCount(nearestTo: 10, sampleRate: 48_000, channelCount: 2))
+    let channelCount = 2
+    let sampleCount = frames * channelCount
+
+    let encoder = try NetworkAudioCompressedEncoder(
+      codec: codec,
+      sampleRate: 48_000,
+      channelCount: channelCount,
+      frameCountPerPacket: frames,
+      bitRate: 0
+    )
+    #expect(!encoder.configuration.isEmpty)
+    let decoder = try NetworkAudioCompressedDecoder(
+      codec: codec,
+      sampleRate: 48_000,
+      channelCount: channelCount,
+      frameCountPerPacket: frames,
+      configuration: encoder.configuration
+    )
+
+    let input = UnsafeMutablePointer<Float>.allocate(capacity: sampleCount)
+    let output = UnsafeMutablePointer<Float>.allocate(capacity: sampleCount)
+    let packet = UnsafeMutableRawBufferPointer.allocate(
+      byteCount: NetworkAudioCodec.maximumPacketByteCount, alignment: 16)
+    defer {
+      input.deallocate()
+      output.deallocate()
+      packet.deallocate()
+    }
+    input.initialize(repeating: 0, count: sampleCount)
+    output.initialize(repeating: 0, count: sampleCount)
+
+    var seed: UInt64 = 0x9E37_79B9_7F4A_7C15
+    var worstError: Float = 0
+    for block in 0..<8 {
+      for frame in 0..<frames {
+        let position = Double(block * frames + frame)
+        seed = seed &* 6_364_136_223_846_793_005 &+ 1
+        let noise = Double(Int64(bitPattern: seed >> 11)) / Double(1 << 52) * 0.04
+        let value = Float(
+          0.20 * sin(2 * .pi * 220 * position / 48_000)
+            + 0.10 * sin(2 * .pi * 3_140 * position / 48_000) + noise
+        )
+        for channel in 0..<channelCount { input[frame * channelCount + channel] = value }
+      }
+      let byteCount = try encoder.encode(input: input, into: packet)
+      guard byteCount > 0 else { continue }
+      let produced = try decoder.decode(
+        packet: UnsafeRawBufferPointer(rebasing: packet[..<byteCount]),
+        into: output
+      )
+      guard block >= 1, produced == frames else { continue }
+      for index in 0..<sampleCount {
+        worstError = max(worstError, abs(output[index] - input[index]))
+      }
+    }
+
+    #expect(worstError == 0)
   }
 
   /// Opus cannot carry 44.1 kHz and the low-delay AAC profiles can, which is the whole reason to
@@ -542,7 +656,8 @@ struct NetworkAudioCodecSuiteTests {
         codec: codec,
         sampleRate: sampleRate,
         channelCount: channelCount,
-        frameCountPerPacket: frameCount
+        frameCountPerPacket: frameCount,
+        configuration: encoder.configuration
       )
       let sampleCount = frameCount * channelCount
       input = .allocate(capacity: sampleCount)
@@ -580,6 +695,7 @@ struct NetworkAudioCodecSuiteTests {
       var decoded: [Float] = []
       for block in 0..<blocks {
         let byteCount = try encodeBlock(block)
+        guard byteCount > 0 else { continue }
         let frames = try decoder.decode(
           packet: UnsafeRawBufferPointer(rebasing: packet[..<byteCount]),
           into: output
