@@ -529,7 +529,7 @@ public enum NetworkAudioPacketCodec {
 }
 
 extension Data {
-  fileprivate mutating func appendInteger<Integer: FixedWidthInteger>(_ value: Integer) {
+  mutating func appendInteger<Integer: FixedWidthInteger>(_ value: Integer) {
     var networkValue = value.bigEndian
     Swift.withUnsafeBytes(of: &networkValue) { append(contentsOf: $0) }
   }
@@ -560,7 +560,7 @@ private struct DatagramWriter {
   }
 }
 
-private struct DataCursor {
+struct DataCursor {
   let data: Data
   private(set) var offset = 0
 

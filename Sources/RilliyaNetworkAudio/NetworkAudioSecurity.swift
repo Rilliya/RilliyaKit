@@ -121,6 +121,20 @@ public struct NetworkAudioSessionCipher: Sendable {
   /// The AES-GCM nonce length.
   static let nonceByteCount = 12
 
+  /// Which kind of message a nonce belongs to.
+  ///
+  /// A session's key seals both audio and the control messages that ask for audio again. Their
+  /// sequences are counted separately, so without a domain the two would eventually pick the same
+  /// nonce under one key, which is the one thing AES-GCM does not survive. The domain occupies
+  /// the four bytes ahead of the sequence, so the two spaces cannot meet.
+  public enum NonceDomain: UInt32, Equatable, Sendable {
+    /// A datagram carrying audio.
+    case audio = 0
+
+    /// A datagram asking for audio to be sent again.
+    case control = 1
+  }
+
   private static let derivationInfo = Data("moe.uwucocoa.rilliya.network-audio.v1".utf8)
 
   private let sessionKey: SymmetricKey
@@ -143,6 +157,7 @@ public struct NetworkAudioSessionCipher: Sendable {
   public func seal(
     payload: UnsafeMutableRawBufferPointer,
     sequence: UInt64,
+    domain: NonceDomain = .audio,
     authenticating header: UnsafeRawBufferPointer
   ) throws -> Int {
     guard let base = payload.baseAddress else {
@@ -151,7 +166,7 @@ public struct NetworkAudioSessionCipher: Sendable {
     let box = try AES.GCM.seal(
       UnsafeRawBufferPointer(payload),
       using: sessionKey,
-      nonce: try Self.nonce(sequence: sequence),
+      nonce: try Self.nonce(sequence: sequence, domain: domain),
       authenticating: header
     )
     guard box.ciphertext.count == payload.count else {
@@ -172,12 +187,13 @@ public struct NetworkAudioSessionCipher: Sendable {
     payload: UnsafeMutableRawBufferPointer,
     tag: UnsafeRawBufferPointer,
     sequence: UInt64,
+    domain: NonceDomain = .audio,
     authenticating header: UnsafeRawBufferPointer
   ) throws {
     let box: AES.GCM.SealedBox
     do {
       box = try AES.GCM.SealedBox(
-        nonce: try Self.nonce(sequence: sequence),
+        nonce: try Self.nonce(sequence: sequence, domain: domain),
         ciphertext: UnsafeRawBufferPointer(payload),
         tag: tag
       )
@@ -197,8 +213,11 @@ public struct NetworkAudioSessionCipher: Sendable {
   ///
   /// Every packet in a session has a distinct sequence, and every session derives its own key, so
   /// no nonce is ever used twice under one key.
-  static func nonce(sequence: UInt64) throws -> AES.GCM.Nonce {
+  static func nonce(sequence: UInt64, domain: NonceDomain = .audio) throws -> AES.GCM.Nonce {
     var bytes = [UInt8](repeating: 0, count: nonceByteCount)
+    withUnsafeBytes(of: domain.rawValue.bigEndian) { source in
+      for index in 0..<source.count { bytes[index] = source[index] }
+    }
     withUnsafeBytes(of: sequence.bigEndian) { source in
       for index in 0..<source.count { bytes[nonceByteCount - source.count + index] = source[index] }
     }
