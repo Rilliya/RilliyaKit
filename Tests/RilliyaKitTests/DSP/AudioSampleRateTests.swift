@@ -431,6 +431,8 @@ struct AudioSampleRateStreamingTests {
     let stepLimit = harness.largestNeighbourStep(harness.reference())
     let settled = Array(rendered.dropFirst(Fixture.outputFrameCount))
     #expect(harness.largestNeighbourStep(settled) < stepLimit * 1.5)
+    // Silence is continuous too, so the tone has to still be there for the step to mean anything.
+    #expect(settled.contains { abs($0) > 0.1 })
   }
 
   /// The output must advance at exactly the ratio, or the stream slowly leads or lags the source.

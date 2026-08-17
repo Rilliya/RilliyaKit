@@ -616,11 +616,6 @@ public final class NetworkAudioCompressedDecoder: @unchecked Sendable {
     packetStorage.deallocate()
   }
 
-  /// Forgets what the decoder has heard, so the next packet starts a new stream.
-  public func reset() {
-    AudioConverterReset(converter)
-  }
-
   /// Expands one packet into `output`.
   ///
   /// A codec that looks ahead yields fewer frames from the opening packets of a stream than they
