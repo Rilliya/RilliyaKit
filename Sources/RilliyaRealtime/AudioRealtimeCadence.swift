@@ -47,6 +47,7 @@ public struct AudioRealtimeTimebase: Equatable, Hashable, Sendable {
   /// Nanoseconds per tick, as the denominator of `numerator / denominator`.
   public let denominator: UInt64
 
+  /// Wraps a mach timebase ratio.
   public init(numerator: UInt64, denominator: UInt64) {
     precondition(numerator > 0 && denominator > 0)
     self.numerator = numerator

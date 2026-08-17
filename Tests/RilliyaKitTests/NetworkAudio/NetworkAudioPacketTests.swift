@@ -10,7 +10,11 @@ import Testing
 struct NetworkAudioPacketTests {
   @Test("Versioned packets round-trip exact metadata and Float32 payload")
   func packetRoundTrip() throws {
-    let sessionID = UUID(uuidString: "01234567-89AB-CDEF-0123-456789ABCDEF")!
+    let sessionID = UUID(
+      uuid: (
+        0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF, 0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD,
+        0xEF
+      ))
     let format = try NetworkAudioStreamFormat(sampleRate: 48_000, channelCount: 2)
     let packet = try NetworkAudioPacket(
       sessionID: sessionID,

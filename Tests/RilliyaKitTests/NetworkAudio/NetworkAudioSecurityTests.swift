@@ -10,8 +10,16 @@ import Testing
 @Suite("Network audio security")
 struct NetworkAudioSecurityTests {
   private enum Fixture {
-    static let sessionID = UUID(uuidString: "01234567-89AB-CDEF-0123-456789ABCDEF")!
-    static let otherSessionID = UUID(uuidString: "FEDCBA98-7654-3210-FEDC-BA9876543210")!
+    static let sessionID = UUID(
+      uuid: (
+        0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF, 0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD,
+        0xEF
+      ))
+    static let otherSessionID = UUID(
+      uuid: (
+        0xFE, 0xDC, 0xBA, 0x98, 0x76, 0x54, 0x32, 0x10, 0xFE, 0xDC, 0xBA, 0x98, 0x76, 0x54, 0x32,
+        0x10
+      ))
     static let payloadByteCount = 1_024
     static let headerByteCount = 48
   }
@@ -61,10 +69,10 @@ struct NetworkAudioSecurityTests {
   /// Reusing a nonce under one key breaks AES-GCM completely, so this is the property the whole
   /// construction rests on.
   @Test("Every sequence produces a distinct nonce")
-  func noncesAreDistinct() {
+  func noncesAreDistinct() throws {
     var seen = Set<Data>()
     for sequence in [UInt64(0), 1, 2, 375, 1_000_000, .max - 1, .max] {
-      let nonce = Data(NetworkAudioSessionCipher.nonce(sequence: sequence))
+      let nonce = Data(try NetworkAudioSessionCipher.nonce(sequence: sequence))
       #expect(nonce.count == 12)
       #expect(seen.insert(nonce).inserted)
     }
@@ -194,8 +202,7 @@ struct NetworkAudioSecurityTests {
       )
       defer { storage.deallocate() }
       plaintext.copyBytes(to: storage.bindMemory(to: UInt8.self), count: plaintext.count)
-      let payload = UnsafeMutableRawBufferPointer(
-        start: storage.baseAddress!, count: plaintext.count)
+      let payload = UnsafeMutableRawBufferPointer(rebasing: storage[..<plaintext.count])
       let written = try header.withUnsafeBytes {
         try cipher.seal(payload: payload, sequence: sequence, authenticating: $0)
       }
@@ -231,7 +238,11 @@ struct NetworkAudioSecurityTests {
 @Suite("Network audio encrypted wire format")
 struct NetworkAudioEncryptedWireTests {
   private enum Fixture {
-    static let sessionID = UUID(uuidString: "0F0E0D0C-0B0A-4908-8706-050403020100")!
+    static let sessionID = UUID(
+      uuid: (
+        0x0F, 0x0E, 0x0D, 0x0C, 0x0B, 0x0A, 0x49, 0x08, 0x87, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01,
+        0x00
+      ))
     static let frameCount = 128
     static let channelCount = 2
 
@@ -365,7 +376,11 @@ struct NetworkAudioEncryptedWireTests {
 @Suite("Network audio encrypted ingest")
 struct NetworkAudioEncryptedIngestTests {
   private enum Fixture {
-    static let sessionID = UUID(uuidString: "11112222-3333-4444-8555-666677778888")!
+    static let sessionID = UUID(
+      uuid: (
+        0x11, 0x11, 0x22, 0x22, 0x33, 0x33, 0x44, 0x44, 0x85, 0x55, 0x66, 0x66, 0x77, 0x77, 0x88,
+        0x88
+      ))
     static let frameCount = 128
     static let channelCount = 2
     static let port: UInt16 = 48_620

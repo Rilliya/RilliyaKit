@@ -16,10 +16,11 @@ struct AudioWaveformSimilarityCompressorTests {
     static let frequency = 220.0
   }
 
-  /// The reason this exists. A queue that shortens itself by moving its read pointer jumps the
-  /// waveform to an unrelated phase, and the step between the last frame it played and the first
-  /// frame after the jump is the click. Overlapping at the matching period leaves the stream
-  /// continuous across that boundary instead.
+  /// The reason this exists.
+  ///
+  /// A queue that shortens itself by moving its read pointer jumps the waveform to an unrelated
+  /// phase, and the step between the last frame it played and the first frame after the jump is
+  /// the click. Overlapping at the matching period leaves the stream continuous instead.
   @Test("Overlapping leaves a far smaller seam than discarding the same frames")
   func seamIsSmallerThanDiscarding() throws {
     let harness = try Harness(channelCount: 1)
@@ -47,9 +48,10 @@ struct AudioWaveformSimilarityCompressorTests {
     #expect(compressedSeam < discardedSeam / 4)
   }
 
-  /// A long crossfade hides a step whatever lag it uses, so the step alone does not show whether
-  /// the lag matched the waveform. Overlapping at the wrong phase makes the two copies cancel,
-  /// and that shows up as level lost from the output.
+  /// The seam alone cannot show whether the lag matched the waveform.
+  ///
+  /// A long crossfade hides a step whatever lag it uses. Overlapping at the wrong phase makes the
+  /// two copies cancel, and that shows up as level lost from the output.
   @Test("Overlapping preserves the level, which a mismatched period would not")
   func levelIsPreserved() throws {
     let harness = try Harness(channelCount: 1)
@@ -157,32 +159,43 @@ struct AudioWaveformSimilarityCompressorTests {
       input.channels.map { Array($0.dropFirst(removal).prefix(Fixture.outputFrameCount)) }
     }
 
+    /// Allocates the planar channels outright rather than escaping pointers from an array's
+    /// `withUnsafeMutableBufferPointer`, which is only valid inside that call.
     func compress(_ input: Planar, removal: Int) throws -> Compressed {
-      var storage = input.channels
-      var output = (0..<channelCount).map { _ in
-        [Float](repeating: .nan, count: Fixture.outputFrameCount)
+      let inputFrameCount = input.channels[0].count
+      let sources = input.channels.map { samples -> UnsafeMutablePointer<Float> in
+        let channel = UnsafeMutablePointer<Float>.allocate(capacity: samples.count)
+        channel.initialize(from: samples, count: samples.count)
+        return channel
       }
-      let removed = storage.withUnsafeMutableBufferPointer { inputStorage in
-        output.withUnsafeMutableBufferPointer { outputStorage -> Int in
-          let inputPointers = (0..<channelCount).map {
-            UnsafePointer(inputStorage[$0].withUnsafeMutableBufferPointer { $0.baseAddress! })
-          }
-          let outputPointers = (0..<channelCount).map {
-            outputStorage[$0].withUnsafeMutableBufferPointer { $0.baseAddress! }
-          }
-          return inputPointers.withUnsafeBufferPointer { inputChannels in
-            outputPointers.withUnsafeBufferPointer { outputChannels in
-              compressor.compress(
-                input: inputChannels,
-                output: outputChannels,
-                outputFrameCount: Fixture.outputFrameCount,
-                removal: removal
-              )
-            }
-          }
+      let destinations = (0..<channelCount).map { _ -> UnsafeMutablePointer<Float> in
+        let channel = UnsafeMutablePointer<Float>.allocate(capacity: Fixture.outputFrameCount)
+        channel.initialize(repeating: .nan, count: Fixture.outputFrameCount)
+        return channel
+      }
+      defer {
+        for channel in sources { channel.deinitialize(count: inputFrameCount) }
+        for channel in destinations { channel.deinitialize(count: Fixture.outputFrameCount) }
+        for channel in sources + destinations { channel.deallocate() }
+      }
+
+      let readOnly = sources.map { UnsafePointer<Float>($0) }
+      let removed = readOnly.withUnsafeBufferPointer { inputChannels in
+        destinations.withUnsafeBufferPointer { outputChannels in
+          compressor.compress(
+            input: inputChannels,
+            output: outputChannels,
+            outputFrameCount: Fixture.outputFrameCount,
+            removal: removal
+          )
         }
       }
-      return Compressed(channels: output, removed: removed)
+      return Compressed(
+        channels: destinations.map {
+          Array(UnsafeBufferPointer(start: $0, count: Fixture.outputFrameCount))
+        },
+        removed: removed
+      )
     }
 
     /// Root mean square, which drops when overlapped copies cancel.

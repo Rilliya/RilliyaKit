@@ -50,9 +50,10 @@ struct AudioJitterBufferTests {
     #expect(harness.buffer.statistics().isPlaying)
   }
 
+  /// Latency must not ratchet upward one underrun at a time.
+  ///
   /// Reading straight from the queue lets every late packet insert a gap the stream never makes
-  /// up, so latency ratchets upward one underrun at a time. Refilling instead keeps the delay a
-  /// measured quantity.
+  /// up. Refilling instead keeps the delay a measured quantity.
   @Test("An underrun raises the target and refills rather than handing out a gap")
   func underrunRaisesTheTarget() throws {
     let harness = try Harness()

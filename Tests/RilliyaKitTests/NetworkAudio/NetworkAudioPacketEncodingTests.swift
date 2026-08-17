@@ -9,7 +9,11 @@ import Testing
 @Suite("Network audio in-place encoding")
 struct NetworkAudioPacketEncodingTests {
   private enum Fixture {
-    static let sessionID = UUID(uuidString: "01234567-89AB-CDEF-0123-456789ABCDEF")!
+    static let sessionID = UUID(
+      uuid: (
+        0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF, 0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD,
+        0xEF
+      ))
     static let sequence: UInt64 = 4_242
   }
 

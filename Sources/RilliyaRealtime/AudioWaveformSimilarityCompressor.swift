@@ -33,6 +33,7 @@ public final class AudioWaveformSimilarityCompressor: @unchecked Sendable {
       correlationWindow: .milliseconds(3)
     )
 
+    /// Wraps validated search bounds.
     public init(minimumLag: Duration, maximumLag: Duration, correlationWindow: Duration) {
       self.minimumLag = minimumLag
       self.maximumLag = maximumLag
@@ -96,6 +97,7 @@ public final class AudioWaveformSimilarityCompressor: @unchecked Sendable {
   /// - Parameters:
   ///   - input: planar channels holding `outputFrameCount + removal` frames.
   ///   - output: planar channels receiving `outputFrameCount` frames.
+  ///   - outputFrameCount: the frames to produce.
   ///   - removal: the frames to remove, which the compressor rounds to the period it finds.
   /// - Returns: the frames actually removed, which is what the caller consumed beyond its output.
   @discardableResult

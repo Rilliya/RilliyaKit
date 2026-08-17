@@ -170,8 +170,10 @@ struct AudioRealtimeWorkerTests {
     worker.stop()
   }
 
-  /// A thread that exits while still joined to a workgroup aborts the process, so a worker
-  /// released without an explicit stop has to leave on its own. Reaching the end of this test at
+  /// A released worker has to leave its workgroup on its own.
+  ///
+  /// A thread that exits while still joined to a workgroup aborts the process, so relying on an
+  /// explicit stop would turn a forgotten call into a crash. Reaching the end of this test at
   /// all is the assertion.
   @Test("Releasing a running worker leaves its workgroup instead of aborting")
   func deinitLeavesTheWorkgroup() throws {

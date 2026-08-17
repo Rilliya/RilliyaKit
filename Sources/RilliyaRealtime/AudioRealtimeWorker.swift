@@ -21,6 +21,7 @@ public struct AudioRealtimeCycle: Equatable, Hashable, Sendable {
   /// Cycles skipped because the previous body ran past its deadline.
   public let missedCycles: Int
 
+  /// Describes one cycle the worker is about to run.
   public init(index: UInt64, scheduledWakeUp: UInt64, deadline: UInt64, missedCycles: Int) {
     self.index = index
     self.scheduledWakeUp = scheduledWakeUp
@@ -166,7 +167,9 @@ public final class AudioRealtimeWorker: @unchecked Sendable {
     thread = created
   }
 
-  /// Stops the worker and waits for its thread to finish. Doing nothing when it is not running.
+  /// Stops the worker and waits for its thread to finish.
+  ///
+  /// Does nothing when the worker is not running, so a repeated call is safe.
   public func stop() {
     let running = lock.withLock { () -> pthread_t? in
       let running = thread

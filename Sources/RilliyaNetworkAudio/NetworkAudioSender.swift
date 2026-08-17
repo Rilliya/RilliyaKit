@@ -381,9 +381,10 @@ private final class NetworkAudioSenderPacketizer: @unchecked Sendable {
     } catch {
       return
     }
+    guard let base = datagram.baseAddress else { return }
     sequence &+= 1
     connection.send(
-      content: Data(bytes: datagram.baseAddress!, count: written),
+      content: Data(bytes: base, count: written),
       completion: .idempotent
     )
   }

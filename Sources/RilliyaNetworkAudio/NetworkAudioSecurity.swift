@@ -49,6 +49,11 @@ public struct NetworkAudioSharedKey: Equatable, Hashable, Sendable {
 
   let key: SymmetricKey
 
+  /// Wraps key material already known to be the right length.
+  private init(validated key: SymmetricKey) {
+    self.key = key
+  }
+
   /// Wraps existing key material.
   public init(_ key: SymmetricKey) throws {
     guard key.bitCount == Self.byteCount * 8 else {
@@ -59,8 +64,7 @@ public struct NetworkAudioSharedKey: Equatable, Hashable, Sendable {
 
   /// Generates a key to show the user for pairing.
   public static func random() -> NetworkAudioSharedKey {
-    // The size is fixed, so this cannot fail.
-    try! NetworkAudioSharedKey(SymmetricKey(size: .bits256))
+    NetworkAudioSharedKey(validated: SymmetricKey(size: SymmetricKeySize(bitCount: byteCount * 8)))
   }
 
   /// Reads a key the user pasted from the other machine.
@@ -80,10 +84,12 @@ public struct NetworkAudioSharedKey: Equatable, Hashable, Sendable {
     key.withUnsafeBytes { Data($0).base64EncodedString() }
   }
 
+  /// Compares the key material itself, so two wrappers around one key are equal.
   public static func == (lhs: NetworkAudioSharedKey, rhs: NetworkAudioSharedKey) -> Bool {
     lhs.key == rhs.key
   }
 
+  /// Hashes the key material, matching ``==(_:_:)``.
   public func hash(into hasher: inout Hasher) {
     key.withUnsafeBytes { hasher.combine(bytes: $0) }
   }
@@ -95,6 +101,7 @@ extension NetworkAudioSharedKey: CustomStringConvertible, CustomDebugStringConve
   /// ``base64EncodedString`` is the deliberate way to read it.
   public var description: String { "NetworkAudioSharedKey(redacted)" }
 
+  /// Redacted, matching ``description``.
   public var debugDescription: String { description }
 }
 
@@ -110,6 +117,9 @@ extension NetworkAudioSharedKey: CustomStringConvertible, CustomDebugStringConve
 public struct NetworkAudioSessionCipher: Sendable {
   /// The authentication tag appended to every encrypted datagram.
   public static let tagByteCount = 16
+
+  /// The AES-GCM nonce length.
+  static let nonceByteCount = 12
 
   private static let derivationInfo = Data("moe.uwucocoa.rilliya.network-audio.v1".utf8)
 
@@ -135,17 +145,22 @@ public struct NetworkAudioSessionCipher: Sendable {
     sequence: UInt64,
     authenticating header: UnsafeRawBufferPointer
   ) throws -> Int {
+    guard let base = payload.baseAddress else {
+      throw NetworkAudioSecurityError.encryptionRequired
+    }
     let box = try AES.GCM.seal(
       UnsafeRawBufferPointer(payload),
       using: sessionKey,
-      nonce: Self.nonce(sequence: sequence),
+      nonce: try Self.nonce(sequence: sequence),
       authenticating: header
     )
-    precondition(box.ciphertext.count == payload.count)
+    guard box.ciphertext.count == payload.count else {
+      throw NetworkAudioSecurityError.encryptionRequired
+    }
     box.ciphertext.copyBytes(to: payload)
     box.tag.copyBytes(
       to: UnsafeMutableRawBufferPointer(
-        start: payload.baseAddress!.advanced(by: payload.count),
+        start: base.advanced(by: payload.count),
         count: Self.tagByteCount
       )
     )
@@ -162,7 +177,7 @@ public struct NetworkAudioSessionCipher: Sendable {
     let box: AES.GCM.SealedBox
     do {
       box = try AES.GCM.SealedBox(
-        nonce: Self.nonce(sequence: sequence),
+        nonce: try Self.nonce(sequence: sequence),
         ciphertext: UnsafeRawBufferPointer(payload),
         tag: tag
       )
@@ -182,12 +197,11 @@ public struct NetworkAudioSessionCipher: Sendable {
   ///
   /// Every packet in a session has a distinct sequence, and every session derives its own key, so
   /// no nonce is ever used twice under one key.
-  static func nonce(sequence: UInt64) -> AES.GCM.Nonce {
-    var bytes = [UInt8](repeating: 0, count: 12)
+  static func nonce(sequence: UInt64) throws -> AES.GCM.Nonce {
+    var bytes = [UInt8](repeating: 0, count: nonceByteCount)
     withUnsafeBytes(of: sequence.bigEndian) { source in
-      for index in 0..<8 { bytes[4 + index] = source[index] }
+      for index in 0..<source.count { bytes[nonceByteCount - source.count + index] = source[index] }
     }
-    // The length is fixed at the nonce size, so this cannot fail.
-    return try! AES.GCM.Nonce(data: bytes)
+    return try AES.GCM.Nonce(data: bytes)
   }
 }

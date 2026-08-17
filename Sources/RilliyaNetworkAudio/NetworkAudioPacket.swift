@@ -240,7 +240,11 @@ public enum NetworkAudioPacketCodec {
     cursor.appendInteger(UInt32(payloadByteCount))
     cursor.appendInteger(UInt32(0))
 
-    let samples = destination.baseAddress!
+    guard let base = destination.baseAddress else {
+      throw NetworkAudioPacketError.truncated
+    }
+    let samples =
+      base
       .advanced(by: headerByteCount)
       .assumingMemoryBound(to: UInt32.self)
     var index = 0

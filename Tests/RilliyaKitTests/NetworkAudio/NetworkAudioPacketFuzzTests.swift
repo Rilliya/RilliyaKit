@@ -139,7 +139,11 @@ struct NetworkAudioPacketFuzzTests {
 
   private func validPacket() throws -> NetworkAudioPacket {
     try NetworkAudioPacket(
-      sessionID: UUID(uuidString: "01234567-89AB-CDEF-0123-456789ABCDEF")!,
+      sessionID: UUID(
+        uuid: (
+          0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF, 0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD,
+          0xEF
+        )),
       sequence: 7,
       format: try NetworkAudioStreamFormat(sampleRate: 48_000, channelCount: 2),
       frameCount: 4,
