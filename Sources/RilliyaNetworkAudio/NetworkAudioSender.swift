@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import Atomics
 import Foundation
 import Network
 import RilliyaRealtime
@@ -27,6 +28,12 @@ public struct NetworkAudioSenderConfiguration: Equatable, Hashable, Sendable {
   /// The largest emitted datagram, including its protocol header.
   public let maximumDatagramByteCount: Int
 
+  /// The frames each datagram carries.
+  ///
+  /// Matching the producer's render quantum keeps one rendered block in one datagram; leaving it
+  /// unset fills every datagram to the MTU, which splits blocks and sends them in bursts.
+  public let framesPerPacket: Int
+
   /// Creates validated sender controls with bounded queue and packet storage.
   public init(
     host: String,
@@ -34,7 +41,8 @@ public struct NetworkAudioSenderConfiguration: Equatable, Hashable, Sendable {
     format: NetworkAudioStreamFormat,
     sessionID: UUID = UUID(),
     capacityFrameCount: Int = 16_384,
-    maximumDatagramByteCount: Int = defaultMaximumDatagramByteCount
+    maximumDatagramByteCount: Int = defaultMaximumDatagramByteCount,
+    framesPerPacket: Int? = nil
   ) throws {
     let normalizedHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !normalizedHost.isEmpty, normalizedHost.utf8.count <= 255 else {
@@ -61,6 +69,20 @@ public struct NetworkAudioSenderConfiguration: Equatable, Hashable, Sendable {
     self.sessionID = sessionID
     self.capacityFrameCount = capacityFrameCount
     self.maximumDatagramByteCount = maximumDatagramByteCount
+    let maximumFrames =
+      (maximumDatagramByteCount - NetworkAudioPacketCodec.headerByteCount)
+      / format.channelCount / MemoryLayout<Float>.stride
+    guard maximumFrames >= 1 else { throw NetworkAudioSenderError.invalidDatagramBound }
+    if let framesPerPacket {
+      guard (1...maximumFrames).contains(framesPerPacket),
+        framesPerPacket <= capacityFrameCount
+      else {
+        throw NetworkAudioSenderError.invalidPacketFrameCount(framesPerPacket)
+      }
+      self.framesPerPacket = framesPerPacket
+    } else {
+      self.framesPerPacket = maximumFrames
+    }
   }
 
   var maximumFrameCountPerPacket: Int {
@@ -83,6 +105,9 @@ public enum NetworkAudioSenderError: Error, Equatable, LocalizedError, Sendable 
   /// The producer queue capacity is outside the realtime buffer bound.
   case invalidBufferCapacity
 
+  /// The requested packet size cannot be carried or cannot be filled from the queue.
+  case invalidPacketFrameCount(Int)
+
   /// A stopped sender cannot be started again.
   case alreadyStopped
 
@@ -103,6 +128,8 @@ public enum NetworkAudioSenderError: Error, Equatable, LocalizedError, Sendable 
       "The network audio packet bound must fit one complete frame and remain below 16,384 bytes."
     case .invalidBufferCapacity:
       "The network audio sender buffer capacity must be between 2 and 65,536 frames."
+    case .invalidPacketFrameCount(let frameCount):
+      "A network audio datagram cannot carry \(frameCount) frames."
     case .alreadyStopped:
       "A stopped network audio sender cannot be restarted."
     case .transport(let failure):
@@ -177,7 +204,7 @@ public final class NetworkAudioSender: @unchecked Sendable {
   private let lock = NSLock()
   private var state = State.ready
   private var connection: NWConnection?
-  private var workerTask: Task<Void, Never>?
+  private var worker: AudioRealtimeWorker?
 
   /// Allocates the fixed PCM queue without opening a network connection.
   public init(
@@ -196,156 +223,154 @@ public final class NetworkAudioSender: @unchecked Sendable {
   }
 
   deinit {
-    lock.withLock {
-      workerTask?.cancel()
-      connection?.cancel()
-    }
+    worker?.stop()
+    connection?.cancel()
   }
 
-  /// Starts one serial background packet and network worker.
+  /// Starts the deadline-scheduled packet worker and its connection.
   public func start() throws {
-    try lock.withLock {
-      switch state {
-      case .running:
-        return
-      case .stopped:
-        throw NetworkAudioSenderError.alreadyStopped
-      case .ready:
-        break
-      }
-
-      guard let port = NWEndpoint.Port(rawValue: configuration.port) else {
-        throw NetworkAudioSenderError.invalidPort
-      }
-
-      let connection = NWConnection(
-        host: NWEndpoint.Host(configuration.host),
-        port: port,
-        using: .udp
-      )
-      let queue = DispatchQueue(
-        label: "moe.uwucocoa.RilliyaKit.network-audio-sender",
-        qos: .userInitiated
-      )
-      connection.start(queue: queue)
-      self.connection = connection
-      let configuration = configuration
-      let frameBuffer = frameBuffer
-      let failureHandler = failureHandler
-      workerTask = Task.detached(priority: .userInitiated) {
-        let worker = NetworkAudioSenderWorker(configuration: configuration)
-        do {
-          try await worker.run(frameBuffer: frameBuffer, connection: connection)
-        } catch is CancellationError {
-          return
-        } catch let error as NetworkAudioSenderError {
-          if !Task.isCancelled { failureHandler(error) }
-        } catch {
-          if !Task.isCancelled {
-            failureHandler(.transport(.unknown(String(describing: error))))
-          }
-        }
-      }
-      state = .running
+    lock.lock()
+    defer { lock.unlock() }
+    switch state {
+    case .running:
+      return
+    case .stopped:
+      throw NetworkAudioSenderError.alreadyStopped
+    case .ready:
+      break
     }
+
+    guard let port = NWEndpoint.Port(rawValue: configuration.port) else {
+      throw NetworkAudioSenderError.invalidPort
+    }
+
+    let parameters = NWParameters.udp
+    parameters.serviceClass = .interactiveVoice
+    let connection = NWConnection(
+      host: NWEndpoint.Host(configuration.host),
+      port: port,
+      using: parameters
+    )
+    let queue = DispatchQueue(
+      label: "moe.uwucocoa.RilliyaKit.network-audio-sender",
+      qos: .userInitiated
+    )
+    connection.start(queue: queue)
+    self.connection = connection
+
+    let packets = NetworkAudioSenderPacketizer(
+      configuration: configuration,
+      frameBuffer: frameBuffer
+    )
+    let worker = AudioRealtimeWorker(
+      label: "moe.uwucocoa.RilliyaKit.network-audio-sender",
+      cadence: try AudioRealtimeCadence(
+        framesPerCycle: configuration.framesPerPacket,
+        sampleRate: configuration.format.sampleRate
+      ),
+      budget: try AudioRealtimeBudget.matching(
+        computation: NetworkAudioSenderPacketizer.computationBudget
+      )
+    ) { _ in
+      packets.emit(through: connection)
+      return .continue
+    }
+    do {
+      try worker.start()
+    } catch {
+      connection.cancel()
+      self.connection = nil
+      throw NetworkAudioSenderError.transport(.unknown(String(describing: error)))
+    }
+    self.worker = worker
+    state = .running
   }
 
-  /// Cancels network IO and waits for temporary packet storage to be released.
+  /// Stops the worker and cancels network IO.
   public func stop() async {
-    let resources = lock.withLock { () -> (Task<Void, Never>?, NWConnection?) in
+    let stopping = lock.withLock { () -> (AudioRealtimeWorker?, NWConnection?) in
       state = .stopped
-      let resources = (workerTask, connection)
-      workerTask = nil
+      let stopping = (worker, connection)
+      worker = nil
       connection = nil
-      return resources
+      return stopping
     }
-    resources.0?.cancel()
-    resources.1?.cancel()
-    await resources.0?.value
+    stopping.0?.stop()
+    stopping.1?.cancel()
   }
 }
 
-private final class NetworkAudioSenderWorker {
-  private let configuration: NetworkAudioSenderConfiguration
-  private let channelStorage: [UnsafeMutablePointer<Float>]
-  private let mutablePointers: [UnsafeMutablePointer<Float>]
+/// Turns queued planar frames into datagrams without allocating.
+///
+/// Every buffer is allocated during initialization, the encoder writes in place, and the send is
+/// fire and forget, so this can run on the sender's realtime thread.
+private final class NetworkAudioSenderPacketizer: @unchecked Sendable {
+  /// The time one packet is allowed to take.
+  ///
+  /// Handing a datagram to Network.framework measured p50 12 µs and worst case 567 µs on this
+  /// hardware, so the budget covers the tail rather than the median.
+  static let computationBudget = Duration.microseconds(700)
 
-  init(configuration: NetworkAudioSenderConfiguration) {
+  private let configuration: NetworkAudioSenderConfiguration
+  private let frameBuffer: AudioRealtimeFrameBuffer
+  private let channelStorage: [UnsafeMutablePointer<Float>]
+  private let readOnlyPointers: [UnsafePointer<Float>]
+  private let datagram: UnsafeMutableRawBufferPointer
+  private var sequence: UInt64 = 0
+
+  init(
+    configuration: NetworkAudioSenderConfiguration,
+    frameBuffer: AudioRealtimeFrameBuffer
+  ) {
     self.configuration = configuration
+    self.frameBuffer = frameBuffer
     let storage = (0..<configuration.format.channelCount).map { _ in
-      UnsafeMutablePointer<Float>.allocate(capacity: configuration.maximumFrameCountPerPacket)
+      UnsafeMutablePointer<Float>.allocate(capacity: configuration.framesPerPacket)
     }
     channelStorage = storage
-    mutablePointers = storage
+    readOnlyPointers = storage.map { UnsafePointer($0) }
+    datagram = UnsafeMutableRawBufferPointer.allocate(
+      byteCount: NetworkAudioPacketCodec.datagramByteCount(
+        channelCount: configuration.format.channelCount,
+        frameCount: configuration.framesPerPacket
+      ),
+      alignment: MemoryLayout<UInt64>.alignment
+    )
   }
 
   deinit {
     for pointer in channelStorage { pointer.deallocate() }
+    datagram.deallocate()
   }
 
-  func run(frameBuffer: AudioRealtimeFrameBuffer, connection: NWConnection) async throws {
-    var sequence: UInt64 = 0
-    while !Task.isCancelled {
-      let available = frameBuffer.statistics().availableFrameCount
-      guard available > 0 else {
-        try await Task.sleep(for: .milliseconds(1))
-        continue
-      }
-      let frameCount = min(available, configuration.maximumFrameCountPerPacket)
-      let result = mutablePointers.withUnsafeBufferPointer {
-        frameBuffer.read(into: $0, frameCount: frameCount)
-      }
-      guard case .read(let readFrameCount, _) = result, readFrameCount > 0 else { continue }
-      let payload = makePayload(frameCount: readFrameCount)
-      let packet: NetworkAudioPacket
-      do {
-        packet = try NetworkAudioPacket(
+  /// Emits one packet when the queue holds a full one, and nothing otherwise.
+  func emit(through connection: NWConnection) {
+    let frameCount = configuration.framesPerPacket
+    guard frameBuffer.statistics().availableFrameCount >= frameCount else { return }
+    let read = channelStorage.withUnsafeBufferPointer {
+      frameBuffer.read(into: $0, frameCount: frameCount)
+    }
+    guard case .read(let readFrameCount, _) = read, readFrameCount == frameCount else { return }
+
+    let written: Int
+    do {
+      written = try readOnlyPointers.withUnsafeBufferPointer {
+        try NetworkAudioPacketCodec.encode(
           sessionID: configuration.sessionID,
           sequence: sequence,
           format: configuration.format,
-          frameCount: readFrameCount,
-          payload: payload
+          frameCount: frameCount,
+          planarChannels: $0,
+          into: datagram
         )
-      } catch let error as NetworkAudioPacketError {
-        throw NetworkAudioSenderError.packet(error)
       }
-      let datagram: Data
-      do {
-        datagram = try NetworkAudioPacketCodec.encode(packet)
-      } catch let error as NetworkAudioPacketError {
-        throw NetworkAudioSenderError.packet(error)
-      }
-      try await send(datagram, through: connection)
-      sequence &+= 1
+    } catch {
+      return
     }
-  }
-
-  private func makePayload(frameCount: Int) -> Data {
-    var payload = Data(
-      capacity: frameCount * configuration.format.channelCount * MemoryLayout<Float>.stride
+    sequence &+= 1
+    connection.send(
+      content: Data(bytes: datagram.baseAddress!, count: written),
+      completion: .idempotent
     )
-    for frame in 0..<frameCount {
-      for channel in 0..<configuration.format.channelCount {
-        let sample = channelStorage[channel][frame]
-        var bits = (sample.isFinite ? sample : 0).bitPattern.littleEndian
-        withUnsafeBytes(of: &bits) { payload.append(contentsOf: $0) }
-      }
-    }
-    return payload
-  }
-
-  private func send(_ data: Data, through connection: NWConnection) async throws {
-    try await withCheckedThrowingContinuation {
-      (continuation: CheckedContinuation<Void, any Error>) in
-      connection.send(
-        content: data,
-        completion: .contentProcessed { error in
-          if let error {
-            continuation.resume(throwing: NetworkAudioSenderError.transport(.init(error)))
-          } else {
-            continuation.resume(returning: ())
-          }
-        })
-    }
   }
 }

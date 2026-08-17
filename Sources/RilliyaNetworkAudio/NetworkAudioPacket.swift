@@ -188,6 +188,67 @@ public enum NetworkAudioPacketCodec {
     return data
   }
 
+  /// The datagram size for a planar frame count, without building the packet.
+  public static func datagramByteCount(
+    channelCount: Int,
+    frameCount: Int
+  ) -> Int {
+    headerByteCount + channelCount * frameCount * MemoryLayout<Float>.stride
+  }
+
+  /// Serialises directly into caller-owned storage, interleaving planar channels as it goes.
+  ///
+  /// The realtime sender calls this once per packet, so it allocates nothing and makes one pass
+  /// over the samples rather than building an interleaved payload first.
+  public static func encode(
+    sessionID: UUID,
+    sequence: UInt64,
+    format: NetworkAudioStreamFormat,
+    frameCount: Int,
+    planarChannels: UnsafeBufferPointer<UnsafePointer<Float>>,
+    into destination: UnsafeMutableRawBufferPointer
+  ) throws -> Int {
+    guard frameCount > 0, frameCount <= Int(UInt16.max) else {
+      throw NetworkAudioPacketError.invalidFrameCount(frameCount)
+    }
+    guard planarChannels.count >= format.channelCount else {
+      throw NetworkAudioPacketError.invalidChannelCount(planarChannels.count)
+    }
+    let payloadByteCount = format.channelCount * frameCount * MemoryLayout<Float>.stride
+    let datagramByteCount = headerByteCount + payloadByteCount
+    guard datagramByteCount <= maximumDatagramByteCount,
+      destination.count >= datagramByteCount
+    else {
+      throw NetworkAudioPacketError.datagramTooLarge
+    }
+
+    var cursor = DatagramWriter(destination: destination)
+    cursor.appendInteger(magic)
+    cursor.appendByte(version)
+    cursor.appendByte(interleavedFloat32Encoding)
+    cursor.appendInteger(UInt16(0))
+    withUnsafeBytes(of: sessionID.uuid) { cursor.appendBytes($0) }
+    cursor.appendInteger(sequence)
+    cursor.appendInteger(UInt32(format.sampleRate.rounded()))
+    cursor.appendInteger(UInt16(format.channelCount))
+    cursor.appendInteger(UInt16(frameCount))
+    cursor.appendInteger(UInt32(payloadByteCount))
+    cursor.appendInteger(UInt32(0))
+
+    let samples = destination.baseAddress!
+      .advanced(by: headerByteCount)
+      .assumingMemoryBound(to: UInt32.self)
+    var index = 0
+    for frame in 0..<frameCount {
+      for channel in 0..<format.channelCount {
+        let sample = planarChannels[channel][frame]
+        samples[index] = (sample.isFinite ? sample : 0).bitPattern.littleEndian
+        index += 1
+      }
+    }
+    return datagramByteCount
+  }
+
   /// Parses one untrusted datagram and rejects malformed metadata before exposing its payload.
   public static func decode(_ data: Data) throws -> NetworkAudioPacket {
     guard data.count <= maximumDatagramByteCount else {
@@ -258,6 +319,31 @@ extension Data {
   fileprivate mutating func appendInteger<Integer: FixedWidthInteger>(_ value: Integer) {
     var networkValue = value.bigEndian
     Swift.withUnsafeBytes(of: &networkValue) { append(contentsOf: $0) }
+  }
+}
+
+private struct DatagramWriter {
+  let destination: UnsafeMutableRawBufferPointer
+  private var offset = 0
+
+  init(destination: UnsafeMutableRawBufferPointer) {
+    self.destination = destination
+  }
+
+  mutating func appendByte(_ value: UInt8) {
+    destination[offset] = value
+    offset += 1
+  }
+
+  mutating func appendInteger<Integer: FixedWidthInteger>(_ value: Integer) {
+    withUnsafeBytes(of: value.bigEndian) { appendBytes($0) }
+  }
+
+  mutating func appendBytes(_ bytes: UnsafeRawBufferPointer) {
+    for byte in bytes {
+      destination[offset] = byte
+      offset += 1
+    }
   }
 }
 
