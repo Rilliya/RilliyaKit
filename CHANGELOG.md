@@ -46,6 +46,28 @@ version section with migration guidance.
 
 - `AudioSampleRateConverter` no longer re-offers the start of its input to the converter, which
   had left a converted stream measurably off pitch — 35 to 43 Hz on a 440 Hz tone.
+- `AudioRealtimeWorker.start()` reports a startup failure instead of deadlocking. It waited for
+  the new thread while holding the lock that thread needed in order to say why it could not start,
+  so any rejected scheduling policy hung the caller for ever — and a caller holding its own lock
+  across `start()`, as the network sender does, wedged that lock with it.
+- `AudioRealtimeWorker.stop()` called twice at once no longer returns from the second call before
+  the thread has finished.
+- Encoding a `NetworkAudioPacket` carries which piece of a block it is and any codec configuration
+  it holds. Both were dropped, so neither survived a round trip.
+- A block is no longer placed by `firstSequence % blockCount`. Every block of a stream is the same
+  number of pieces wide, so the starts shared a factor with the depth and all of them landed in
+  one slot: the window was one block however deep it was set, and a piece asked for could never
+  arrive in time to be used. The reassembler now holds four blocks, which is what makes
+  retransmission work at all on a split stream.
+- The sender declares what a cycle costs when it sends a split block. It declared the cost of one
+  datagram while handing over as many as the block was split into — eighteen measured for stereo
+  Apple Lossless, spanning 1089 µs against 700 µs declared, which is how a realtime thread is
+  demoted out of the realtime scheduler.
+- A discovery cancelled while its listener was still being built no longer leaks that listener and
+  its UDP port. Measured across a sweep of cancel instants, five of 220 cancelled discoveries held
+  their port three seconds later.
+- A stopped `NetworkAudioReceiver` no longer accepts a connection whose handler was already queued,
+  which had let it go on writing audio into its frame buffer after it was stopped.
 
 ### Security
 
@@ -61,6 +83,27 @@ version section with migration guidance.
   key, so an unkeyed request cannot make a keyed sender send.
 - Removed every `try!` and force unwrap this package's own lint rules forbid, so malformed input
   reaches an error rather than a trap.
+- **Remote heap buffer overflow.** The fragmented flag waives the rule tying a payload's length to
+  the frames it claims — right for a piece of a compressed block, wrong for samples, which are
+  sized to fit one datagram by construction. Nothing downstream looked at the flag again, so one
+  datagram claiming samples, the flag, and a long payload was copied straight into storage sized
+  for a block. Reproduced under AddressSanitizer against a receiver reading a real socket, from a
+  single unauthenticated datagram. The flag now belongs to compressed encodings only; the sample
+  write is additionally clamped to its storage, and the storage is initialised so that reading
+  past the last packet returns silence rather than heap.
+- A sender mints its session identity per run rather than carrying one in its configuration. Two
+  senders built from one configuration value derived the same session key and both began at
+  sequence zero, which is the same nonce over different audio.
+- A retransmission request carries nothing that stops it being replayed, so a sender answers any
+  one sequence once. A captured request otherwise made it resend for as long as an attacker
+  repeated it.
+- A retransmission request is answered on the thread that owns the datagram history rather than on
+  the network queue. The two shared the history and one packet buffer with no synchronisation:
+  ThreadSanitizer reported the history race, and the shared buffer would put one packet's bytes on
+  the wire under another's sequence and then store those bytes as the history for it.
+- A fragment naming a place further along than its own sequence is refused. The subtraction wrapped
+  to near `UInt64.max` and became the newest sequence seen, after which every genuine piece was
+  refused — one datagram disabled reassembly, and with it Apple Lossless, for the whole session.
 
 ### Breaking Changes
 
@@ -71,6 +114,12 @@ version section with migration guidance.
   `NetworkAudioRetransmissionRequest.encoded(cipher:)`, which names the domain for you.
 - The packet header's reserved word is no longer reserved. A sender and receiver from different
   builds do not interoperate; both sides must be updated together.
+- `NetworkAudioSenderConfiguration` no longer takes or holds a `sessionID`. The identity belongs to
+  a run, not to a configuration a caller may reuse. Read it from `NetworkAudioSender`'s
+  `activeSessionID` once started.
+- `NetworkAudioCompressedDecoder.reset()` is gone. It had no caller and no behaviour any test could
+  pin — emptying it changed nothing any decoder does. Build a new decoder for a new stream, which
+  is what the receiver does.
 
 ## 0.1.0-prealpha.1
 
