@@ -21,6 +21,29 @@ public enum AudioJitterBufferError: Error, Equatable, LocalizedError, Sendable {
   }
 }
 
+/// How a jitter buffer shortens itself when it holds more than its target.
+public enum AudioJitterCorrection: String, Codable, Equatable, Hashable, Sendable, CaseIterable {
+  /// Move the read pointer past the surplus.
+  ///
+  /// Costs nothing and removes exactly what is asked, but the waveform jumps to an unrelated
+  /// phase and the step is audible as a click on continuous material.
+  case discard
+
+  /// Overlap the waveform with itself at the period it most resembles.
+  ///
+  /// Leaves no step and loses no level, at the cost of a correlation search per correction, and
+  /// removes close to one period rather than exactly what is asked.
+  case overlap
+
+  /// A name suitable for a settings control.
+  public var displayName: String {
+    switch self {
+    case .discard: "Discard"
+    case .overlap: "Overlap"
+    }
+  }
+}
+
 /// Bounded controls for one receive-side jitter buffer.
 public struct AudioJitterBufferConfiguration: Equatable, Hashable, Sendable {
   /// A wired local network needs only a couple of packets of slack.
@@ -33,7 +56,9 @@ public struct AudioJitterBufferConfiguration: Equatable, Hashable, Sendable {
     maximumLatency: .milliseconds(200),
     underrunPenalty: .milliseconds(3),
     trimFraction: 0.05,
-    resynchronizationThreshold: .milliseconds(500)
+    resynchronizationThreshold: .milliseconds(500),
+    correction: .overlap,
+    surplusReadsBeforeCorrection: 8
   )
 
   /// The latency the buffer aims to hold once it settles.
@@ -57,6 +82,15 @@ public struct AudioJitterBufferConfiguration: Equatable, Hashable, Sendable {
   /// A silence longer than this is treated as a new stream rather than something to conceal.
   public let resynchronizationThreshold: Duration
 
+  /// How the buffer removes a surplus.
+  public let correction: AudioJitterCorrection
+
+  /// Reads that must run above target in a row before the buffer corrects.
+  ///
+  /// A burst that arrives early and drains again needs no correction, and correcting it anyway
+  /// spends audio on nothing.
+  public let surplusReadsBeforeCorrection: Int
+
   /// Creates validated controls.
   public init(
     targetLatency: Duration = AudioJitterBufferConfiguration.localNetworkTarget,
@@ -64,7 +98,9 @@ public struct AudioJitterBufferConfiguration: Equatable, Hashable, Sendable {
     maximumLatency: Duration = .milliseconds(200),
     underrunPenalty: Duration = .milliseconds(3),
     trimFraction: Double = 0.05,
-    resynchronizationThreshold: Duration = .milliseconds(500)
+    resynchronizationThreshold: Duration = .milliseconds(500),
+    correction: AudioJitterCorrection = .overlap,
+    surplusReadsBeforeCorrection: Int = 8
   ) throws {
     guard minimumLatency >= .zero,
       minimumLatency <= targetLatency,
@@ -72,7 +108,8 @@ public struct AudioJitterBufferConfiguration: Equatable, Hashable, Sendable {
       underrunPenalty >= .zero,
       trimFraction > 0,
       trimFraction <= 1,
-      resynchronizationThreshold > .zero
+      resynchronizationThreshold > .zero,
+      surplusReadsBeforeCorrection >= 0
     else {
       throw AudioJitterBufferError.invalidLatencyRange
     }
@@ -82,6 +119,8 @@ public struct AudioJitterBufferConfiguration: Equatable, Hashable, Sendable {
     self.underrunPenalty = underrunPenalty
     self.trimFraction = trimFraction
     self.resynchronizationThreshold = resynchronizationThreshold
+    self.correction = correction
+    self.surplusReadsBeforeCorrection = surplusReadsBeforeCorrection
   }
 
   private init(
@@ -90,8 +129,12 @@ public struct AudioJitterBufferConfiguration: Equatable, Hashable, Sendable {
     maximumLatency: Duration,
     underrunPenalty: Duration,
     trimFraction: Double,
-    resynchronizationThreshold: Duration
+    resynchronizationThreshold: Duration,
+    correction: AudioJitterCorrection,
+    surplusReadsBeforeCorrection: Int
   ) {
+    self.correction = correction
+    self.surplusReadsBeforeCorrection = surplusReadsBeforeCorrection
     self.targetLatency = targetLatency
     self.minimumLatency = minimumLatency
     self.maximumLatency = maximumLatency
@@ -115,8 +158,11 @@ public struct AudioJitterBufferStatistics: Equatable, Sendable {
   /// Reads that found less audio than they asked for.
   public let underrunCount: UInt64
 
-  /// Frames dropped because the queue ran past the ceiling.
+  /// Frames removed to bring the queue back to its target.
   public let trimmedFrameCount: UInt64
+
+  /// Corrections that overlapped the waveform rather than jumping it.
+  public let overlapCount: UInt64
 
   /// Times the buffer gave up on the stream and refilled from empty.
   public let resynchronizationCount: UInt64
@@ -142,7 +188,13 @@ public final class AudioJitterBuffer: @unchecked Sendable {
   private let maximumFrameCount: Int
   private let underrunPenaltyFrameCount: Int
   private let resynchronizationFrameCount: Int
+  private let compressor: AudioWaveformSimilarityCompressor?
+  private let scratch: [UnsafeMutablePointer<Float>]
+  private let scratchReadOnly: [UnsafePointer<Float>]
+  private let renderQuantumLimit: Int
   private var targetFrameCount: Int
+  private var surplusReadCount = 0
+  private var overlapCount: UInt64 = 0
   private var isPlaying = false
   private var underrunCount: UInt64 = 0
   private var trimmedFrameCount: UInt64 = 0
@@ -152,23 +204,54 @@ public final class AudioJitterBuffer: @unchecked Sendable {
   /// Prepares a jitter buffer over an existing receive queue.
   public init(
     frameBuffer: AudioRealtimeFrameBuffer,
-    configuration: AudioJitterBufferConfiguration = .localNetwork
+    configuration: AudioJitterBufferConfiguration = .localNetwork,
+    maximumFrameCount: Int = 4_096
   ) throws {
     let sampleRate = frameBuffer.format.sampleRate
     func frames(_ duration: Duration) -> Int {
       Int((Double(duration.wholeNanoseconds) / 1_000_000_000 * sampleRate).rounded())
     }
-    let maximumFrameCount = frames(configuration.maximumLatency)
-    guard maximumFrameCount <= frameBuffer.capacityFrameCount else {
+    let latencyCeilingFrameCount = frames(configuration.maximumLatency)
+    guard latencyCeilingFrameCount <= frameBuffer.capacityFrameCount else {
       throw AudioJitterBufferError.latencyExceedsCapacity(configuration.maximumLatency)
     }
     self.frameBuffer = frameBuffer
     self.configuration = configuration
     minimumFrameCount = frames(configuration.minimumLatency)
-    self.maximumFrameCount = maximumFrameCount
+    self.maximumFrameCount = latencyCeilingFrameCount
     underrunPenaltyFrameCount = max(frames(configuration.underrunPenalty), 1)
     resynchronizationFrameCount = frames(configuration.resynchronizationThreshold)
     targetFrameCount = frames(configuration.targetLatency)
+    renderQuantumLimit = maximumFrameCount
+    switch configuration.correction {
+    case .discard:
+      compressor = nil
+      scratch = []
+    case .overlap:
+      let candidate = try AudioWaveformSimilarityCompressor(
+        format: frameBuffer.format,
+        maximumFrameCount: maximumFrameCount
+      )
+      // A render quantum too short to host a crossfade leaves discarding as the only option.
+      let compressor = candidate.isEffective ? candidate : nil
+      self.compressor = compressor
+      guard let compressor else {
+        scratch = []
+        scratchReadOnly = []
+        return
+      }
+      scratch = (0..<frameBuffer.format.channelCount).map { _ in
+        let capacity = maximumFrameCount + compressor.additionalFrameCount
+        let buffer = UnsafeMutablePointer<Float>.allocate(capacity: capacity)
+        buffer.initialize(repeating: 0, count: capacity)
+        return buffer
+      }
+    }
+    scratchReadOnly = scratch.map { UnsafePointer($0) }
+  }
+
+  deinit {
+    for pointer in scratch { pointer.deallocate() }
   }
 
   /// Reads one render quantum, holding silence until the buffer has filled to its target.
@@ -211,13 +294,61 @@ public final class AudioJitterBuffer: @unchecked Sendable {
       return .read(frameCount: 0, silencedFrameCount: frameCount)
     }
 
-    if available > targetFrameCount + frameCount {
-      let surplus = available - targetFrameCount
-      let trim = max(Int(Double(surplus) * configuration.trimFraction), 1)
-      let dropped = frameBuffer.discardOldestFrames(keepingLatest: available - trim)
-      trimmedFrameCount &+= UInt64(dropped)
+    guard available > targetFrameCount + frameCount else {
+      surplusReadCount = 0
+      return frameBuffer.read(into: outputChannels, frameCount: frameCount)
     }
-    return frameBuffer.read(into: outputChannels, frameCount: frameCount)
+    surplusReadCount += 1
+    guard surplusReadCount > configuration.surplusReadsBeforeCorrection else {
+      return frameBuffer.read(into: outputChannels, frameCount: frameCount)
+    }
+    surplusReadCount = 0
+    let surplus = available - targetFrameCount
+    let removal = max(Int(Double(surplus) * configuration.trimFraction), 1)
+    return correct(
+      into: outputChannels,
+      frameCount: frameCount,
+      removal: removal
+    )
+  }
+
+  /// Removes `removal` frames while producing one full quantum.
+  private func correct(
+    into outputChannels: UnsafeBufferPointer<UnsafeMutablePointer<Float>>,
+    frameCount: Int,
+    removal: Int
+  ) -> AudioRealtimeFrameBufferReadResult {
+    guard let compressor, frameCount <= renderQuantumLimit else {
+      let dropped = frameBuffer.discardOldestFrames(
+        keepingLatest: frameBuffer.statistics().availableFrameCount - removal
+      )
+      trimmedFrameCount &+= UInt64(dropped)
+      return frameBuffer.read(into: outputChannels, frameCount: frameCount)
+    }
+
+    let request = frameCount + compressor.maximumRemovableFrameCount
+    // Peeking lets the compressor choose its period before anything is consumed, so frames it
+    // declines stay queued instead of being lost.
+    let peeked = scratch.withUnsafeBufferPointer {
+      frameBuffer.peek(into: $0, frameCount: request)
+    }
+    guard case .read(let peekedFrameCount, _) = peeked, peekedFrameCount == request else {
+      return frameBuffer.read(into: outputChannels, frameCount: frameCount)
+    }
+    let removed = scratchReadOnly.withUnsafeBufferPointer { input in
+      compressor.compress(
+        input: input,
+        output: outputChannels,
+        outputFrameCount: frameCount,
+        removal: min(removal, compressor.maximumRemovableFrameCount)
+      )
+    }
+    if removed > 0 {
+      overlapCount &+= 1
+      trimmedFrameCount &+= UInt64(removed)
+    }
+    frameBuffer.advance(frameCount: frameCount + removed)
+    return .read(frameCount: frameCount, silencedFrameCount: 0)
   }
 
   /// Discards everything queued and refills from empty.
@@ -236,6 +367,7 @@ public final class AudioJitterBuffer: @unchecked Sendable {
       availableFrameCount: frameBuffer.statistics().availableFrameCount,
       underrunCount: underrunCount,
       trimmedFrameCount: trimmedFrameCount,
+      overlapCount: overlapCount,
       resynchronizationCount: resynchronizationCount
     )
   }

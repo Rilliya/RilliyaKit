@@ -20,14 +20,18 @@ struct AudioJitterBufferTests {
       minimum: Duration = .milliseconds(2),
       maximum: Duration = .milliseconds(200),
       underrunPenalty: Duration = .milliseconds(3),
-      trimFraction: Double = 0.05
+      trimFraction: Double = 0.05,
+      correction: AudioJitterCorrection = .discard,
+      surplusReadsBeforeCorrection: Int = 0
     ) throws -> AudioJitterBufferConfiguration {
       try AudioJitterBufferConfiguration(
         targetLatency: target,
         minimumLatency: minimum,
         maximumLatency: maximum,
         underrunPenalty: underrunPenalty,
-        trimFraction: trimFraction
+        trimFraction: trimFraction,
+        correction: correction,
+        surplusReadsBeforeCorrection: surplusReadsBeforeCorrection
       )
     }
   }
@@ -106,6 +110,64 @@ struct AudioJitterBufferTests {
     #expect(reads < 500)
   }
 
+  /// A burst that arrives early and drains again needs no correction, and correcting it anyway
+  /// spends audio on nothing.
+  @Test("A surplus that does not persist is left alone")
+  func transientSurplusIsIgnored() throws {
+    let harness = try Harness(
+      configuration: try Fixture.configuration(surplusReadsBeforeCorrection: 8)
+    )
+    harness.write(Fixture.targetFrames * 6)
+
+    // Fewer reads above target than the hysteresis allows.
+    for _ in 0..<6 { _ = harness.read() }
+
+    #expect(harness.buffer.statistics().trimmedFrameCount == 0)
+  }
+
+  @Test("A surplus that persists past the hysteresis is corrected")
+  func persistentSurplusIsCorrected() throws {
+    let harness = try Harness(
+      configuration: try Fixture.configuration(surplusReadsBeforeCorrection: 8)
+    )
+    harness.write(Fixture.targetFrames * 40)
+
+    for _ in 0..<12 {
+      harness.write(Fixture.quantum)
+      _ = harness.read()
+    }
+
+    #expect(harness.buffer.statistics().trimmedFrameCount > 0)
+  }
+
+  /// Overlapping needs a block long enough to host the crossfade, so a buffer configured for it
+  /// with a short quantum has to fall back rather than silently stop correcting.
+  @Test("Overlap correction is used when the quantum allows and falls back when it does not")
+  func overlapFallsBackOnShortQuanta() throws {
+    let long = try Harness(
+      configuration: try Fixture.configuration(correction: .overlap),
+      quantum: 1_024
+    )
+    long.write(Fixture.targetFrames * 40)
+    for _ in 0..<12 {
+      long.write(1_024)
+      _ = long.read()
+    }
+    #expect(long.buffer.statistics().overlapCount > 0)
+
+    let short = try Harness(
+      configuration: try Fixture.configuration(correction: .overlap),
+      quantum: 128
+    )
+    short.write(Fixture.targetFrames * 40)
+    for _ in 0..<12 {
+      short.write(128)
+      _ = short.read()
+    }
+    #expect(short.buffer.statistics().overlapCount == 0)
+    #expect(short.buffer.statistics().trimmedFrameCount > 0)
+  }
+
   @Test("A steady stream neither trims nor underruns")
   func steadyStreamIsUntouched() throws {
     let harness = try Harness()
@@ -171,23 +233,29 @@ struct AudioJitterBufferTests {
   private final class Harness {
     let frameBuffer: AudioRealtimeFrameBuffer
     let buffer: AudioJitterBuffer
+    let quantum: Int
 
     private let output: [UnsafeMutablePointer<Float>]
     private let input: [UnsafeMutablePointer<Float>]
     private var writtenFrames = 0
 
-    init(configuration: AudioJitterBufferConfiguration? = nil) throws {
+    init(
+      configuration: AudioJitterBufferConfiguration? = nil,
+      quantum: Int = Fixture.quantum
+    ) throws {
+      self.quantum = quantum
       frameBuffer = try AudioRealtimeFrameBuffer(
         format: AudioProcessingFormat(sampleRate: Fixture.sampleRate, channelCount: 1),
         capacityFrameCount: Fixture.capacity
       )
       buffer = try AudioJitterBuffer(
         frameBuffer: frameBuffer,
-        configuration: configuration ?? .localNetwork
+        configuration: configuration ?? Fixture.configuration(),
+        maximumFrameCount: quantum
       )
-      output = [UnsafeMutablePointer<Float>.allocate(capacity: Fixture.quantum)]
+      output = [UnsafeMutablePointer<Float>.allocate(capacity: quantum)]
       input = [UnsafeMutablePointer<Float>.allocate(capacity: Fixture.capacity)]
-      output[0].initialize(repeating: 0, count: Fixture.quantum)
+      output[0].initialize(repeating: 0, count: quantum)
       input[0].initialize(repeating: 0, count: Fixture.capacity)
     }
 
@@ -213,11 +281,11 @@ struct AudioJitterBufferTests {
     }
 
     func read() -> ReadOutcome {
-      output[0].update(repeating: .nan, count: Fixture.quantum)
+      output[0].update(repeating: .nan, count: quantum)
       _ = output.withUnsafeBufferPointer {
-        buffer.read(into: $0, frameCount: Fixture.quantum)
+        buffer.read(into: $0, frameCount: quantum)
       }
-      let samples = UnsafeBufferPointer(start: output[0], count: Fixture.quantum)
+      let samples = UnsafeBufferPointer(start: output[0], count: quantum)
       return samples.allSatisfy { $0 == 0 } ? .silence : .audio
     }
   }

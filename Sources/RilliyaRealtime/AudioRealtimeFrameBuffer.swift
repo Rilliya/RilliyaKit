@@ -128,6 +128,42 @@ public final class AudioRealtimeFrameBuffer: @unchecked Sendable {
     into outputChannels: UnsafeBufferPointer<UnsafeMutablePointer<Float>>,
     frameCount: Int
   ) -> AudioRealtimeFrameBufferReadResult {
+    copyFrames(into: outputChannels, frameCount: frameCount, advances: true)
+  }
+
+  /// Copies frames without consuming them, so a caller can inspect audio before deciding how
+  /// much of it to take.
+  ///
+  /// Calls must come from the same single consumer as ``read(into:frameCount:)``.
+  @discardableResult
+  public func peek(
+    into outputChannels: UnsafeBufferPointer<UnsafeMutablePointer<Float>>,
+    frameCount: Int
+  ) -> AudioRealtimeFrameBufferReadResult {
+    copyFrames(into: outputChannels, frameCount: frameCount, advances: false)
+  }
+
+  /// Consumes frames the caller has already inspected.
+  ///
+  /// - Returns: the frames actually consumed, which is bounded by what is available.
+  @discardableResult
+  public func advance(frameCount: Int) -> Int {
+    guard frameCount > 0 else { return 0 }
+    let read = readPosition.load(ordering: .relaxed)
+    let write = writePosition.load(ordering: .acquiring)
+    let available = min(frameDistance(from: read, to: write), capacityFrameCount)
+    let consumed = min(frameCount, available)
+    guard consumed > 0 else { return 0 }
+    readPosition.store(read &+ UInt64(consumed), ordering: .releasing)
+    add(consumed, to: readFrameCount)
+    return consumed
+  }
+
+  private func copyFrames(
+    into outputChannels: UnsafeBufferPointer<UnsafeMutablePointer<Float>>,
+    frameCount: Int,
+    advances: Bool
+  ) -> AudioRealtimeFrameBufferReadResult {
     guard frameCount >= 0 else { return .invalidFrameCount }
     guard outputChannels.count >= format.channelCount else { return .insufficientChannels }
     guard frameCount > 0 else { return .read(frameCount: 0, silencedFrameCount: 0) }
@@ -163,9 +199,11 @@ public final class AudioRealtimeFrameBuffer: @unchecked Sendable {
       }
     }
 
-    readPosition.store(read &+ UInt64(copiedFrameCount), ordering: .releasing)
-    add(copiedFrameCount, to: readFrameCount)
-    add(silenced, to: silencedFrameCount)
+    if advances {
+      readPosition.store(read &+ UInt64(copiedFrameCount), ordering: .releasing)
+      add(copiedFrameCount, to: readFrameCount)
+      add(silenced, to: silencedFrameCount)
+    }
     return .read(frameCount: copiedFrameCount, silencedFrameCount: silenced)
   }
 
