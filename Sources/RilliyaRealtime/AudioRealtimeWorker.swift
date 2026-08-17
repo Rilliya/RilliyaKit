@@ -118,6 +118,8 @@ public final class AudioRealtimeWorker: @unchecked Sendable {
   ///
   /// `start()` waits for the new thread while holding ``lock``, so a thread that needed ``lock``
   /// to report why it could not start could never report it, and both sides would wait for ever.
+  /// Serialises teardown, so a second `stop()` waits for the first rather than returning early.
+  private let stopLock = NSLock()
   private let startupLock = NSLock()
   private var startupError: AudioRealtimeWorkerError?
   private let startupSemaphore = DispatchSemaphore(value: 0)
@@ -174,8 +176,12 @@ public final class AudioRealtimeWorker: @unchecked Sendable {
 
   /// Stops the worker and waits for its thread to finish.
   ///
-  /// Does nothing when the worker is not running, so a repeated call is safe.
+  /// Does nothing when the worker is not running, so a repeated call is safe. A second caller
+  /// arriving while the first is still waiting waits with it: returning early would report a
+  /// stopped worker whose body is still running, and the body's storage is torn down on that word.
   public func stop() {
+    stopLock.lock()
+    defer { stopLock.unlock() }
     let running = lock.withLock { () -> pthread_t? in
       let running = thread
       thread = nil
