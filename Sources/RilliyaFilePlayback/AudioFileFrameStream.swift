@@ -4,6 +4,7 @@ import AudioToolbox
 import Foundation
 import RilliyaCore
 import RilliyaRealtime
+import os
 
 /// The number of complete passes a file stream performs before finishing.
 public enum AudioFileLoopMode: Equatable, Hashable, Sendable {
@@ -174,6 +175,19 @@ public enum AudioFileFrameStreamEvent: Equatable, Sendable {
 
   /// Background decoding stopped after a typed failure.
   case failed(AudioFileFrameStreamError)
+}
+
+/// The one way to see why a file is or is not moving.
+///
+/// Off unless debug logging is enabled: a producer keeping its queues full says so on every cycle,
+/// and what matters is only whether it stays at one of these for a long time.
+private let producerLog = Logger(subsystem: "moe.uwucocoa.rilliyakit", category: "file-playback")
+
+/// What the producer last said about why it is or is not moving, so it says it once per change.
+private enum ProducerReport {
+  case advancing
+  case noDestination
+  case destinationFull
 }
 
 /// Streams a supported local audio file into one bounded realtime PCM buffer.
@@ -403,17 +417,34 @@ public final class AudioFileFrameStream: @unchecked Sendable {
       capacityFrameCount: configuration.chunkFrameCount
     )
     var completedPassCount = 0
+    var stallReport = ProducerReport.advancing
     while !Task.isCancelled {
       // Paced by the fullest destination, and by nothing at all while none is reading: a file
       // read into queues nobody holds is audio decoded and then thrown away.
       guard let fullest = distributor.maximumAvailableFrameCount else {
+        if stallReport != .noDestination {
+          stallReport = .noDestination
+          producerLog.debug("no destination is reading this file")
+        }
         try await Task.sleep(for: .milliseconds(2))
         continue
       }
       let writable = distributor.capacityFrameCount - fullest
       if writable == 0 {
+        if stallReport != .destinationFull {
+          stallReport = .destinationFull
+          // The resting state of a throttled producer, not a fault: the file stays a queue ahead
+          // of whichever destination is furthest behind, and only moves as that one reads.
+          producerLog.debug(
+            "queues full at \(distributor.capacityFrameCount) frames, waiting for a read")
+        }
         try await Task.sleep(for: .milliseconds(2))
         continue
+      }
+      if stallReport != .advancing {
+        stallReport = .advancing
+        producerLog.debug(
+          "advancing to \(distributor.activeSubscriberCount) destinations")
       }
 
       var requestedFrameCount = UInt32(min(configuration.chunkFrameCount, writable))
