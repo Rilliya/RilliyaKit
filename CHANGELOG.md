@@ -6,10 +6,35 @@ RilliyaKit follows Semantic Versioning. Versions below 1.0 are development relea
 contain source-breaking changes. Every released breaking change is documented in the relevant
 version section with migration guidance.
 
-## Unreleased
+## 0.2.0-alpha.1
 
 ### Added
 
+- One producer serves several destinations. `AudioRealtimeFrameDistributor` gives each destination
+  a queue of its own, so `NetworkAudioReceiver` and `AudioFileFrameStream` can each feed more than
+  one reader without the readers stealing each other's audio. `preferredDestinationCount` is 8,
+  fitted down when a stream is wide enough that eight queues would exceed the storage limit.
+  A live stream is subscribed to through `subscribeWithJitterBuffer()`, which gives every
+  destination its own clock correction — trimming and overlapping can only serve one clock, so a
+  shared jitter buffer cannot serve two.
+- A file and a live stream are paced differently, because they owe their destinations different
+  things. `AudioFileFrameStream` owes every destination the same fixed sequence, so it paces on the
+  fullest queue and never drops; it stalls when nothing is subscribed rather than playing to no one.
+  A live stream paces on wall clock and drops what is already stale.
+- `AudioRealtimeMeter` measures audio from the thread that is carrying it. It writes into
+  preallocated storage under a try-lock, so a thread that cannot take the lock carries on rather
+  than waiting, and publishes off that thread. `AudioRealtimeMeterConfiguration` sets the rate,
+  waveform width, and decibel floor. This is what lets a source with no capture device behind it —
+  a generated signal, a played file, a received stream — be drawn like any other.
+- `AudioSourceID.stream(UUID)` names audio a host produces itself, so a meter, a level, or a drawn
+  waveform can say something about a source that has no device or process behind it.
+- `AudioFileFrameStream` meters what it is playing, and reports why it is or is not moving.
+- `waveformUpdatesPerSecond` is a host's choice on a receiver, a file stream, and a meter, rather
+  than fixed at 30.
+- `NetworkAudioKeyProvider` supplies the shared key when a session starts rather than holding it in
+  a configuration value, so a host can read it from the Keychain at that moment and a configuration
+  can be logged or compared without carrying key material. `NetworkAudioStaticKeyProvider` wraps a
+  literal key for callers that have one already.
 - `RilliyaDSP` converts between sample rates. `AudioSampleRateConverter` handles interleaved and
   planar layouts and carries between blocks whatever a conversion did not consume, so a long
   stream does not drift. `AudioSampleRateLadder` resolves a source rate to a supported one by
@@ -38,12 +63,23 @@ version section with migration guidance.
 
 ### Changed
 
+- `NetworkAudioSender.start()` and `NetworkAudioReceiver.start()` are `async throws`, because the
+  key provider is asked at that point.
+- `NetworkAudioReceiverStatistics` reports `publishedFrameCount`, `destinationCount`, and
+  `smallestQueuedFrameCount` in place of a single frame buffer's statistics. Retransmission is
+  budgeted against the smallest queue, since that is the destination closest to running out.
 - The reserved word in the packet header now carries the length of a codec's configuration, and
   a codec that needs one sends it behind the payload and inside the seal. The header remains 48
   bytes.
 
 ### Fixed
 
+- A waveform that moved tells whoever is drawing it. The measurement landed in storage nothing was
+  told about, so a canvas drew whatever it happened to read.
+- A codec's configuration is carried on every piece of a split block, not only the first. A
+  destination that joined mid-block could not decode until the next one began.
+- The destination count is fitted to the stream's width. Eight destinations at 64 channels asked for
+  more storage than the limit allows and the receiver refused to start at all.
 - `AudioSampleRateConverter` no longer re-offers the start of its input to the converter, which
   had left a converted stream measurably off pitch — 35 to 43 Hz on a 440 Hz tone.
 - `AudioRealtimeWorker.start()` reports a startup failure instead of deadlocking. It waited for
@@ -107,6 +143,18 @@ version section with migration guidance.
 
 ### Breaking Changes
 
+- The metering types moved from `RilliyaCapture` to `RilliyaRealtime`: `AudioWaveformMeter`,
+  `AudioChannelMeterSnapshot`, and `AudioMeterDSP`. They describe measuring audio on a realtime
+  thread, which is not specific to capturing it. Change the import; the types are unchanged.
+- `NetworkAudioReceiver.frameBuffer` and `.jitterBuffer`, and `AudioFileFrameStream.frameBuffer`,
+  are replaced by `.distributor`. Read audio by subscribing — `subscribeWithJitterBuffer()` for a
+  stream, `subscribe()` for a file — and hold the subscription for as long as you read from it: a
+  dropped subscription returns its queue to the distributor, which may hand the same slot to
+  someone else.
+- `NetworkAudioSenderConfiguration.sharedKey` and `NetworkAudioReceiverConfiguration.sharedKey` are
+  replaced by `keyProvider`. Pass `NetworkAudioStaticKeyProvider(key)` to keep the old behaviour.
+  Both configurations are no longer `Equatable` or `Hashable`, since a provider is not comparable.
+- `AudioSourceID` has a new case. A switch over it that was exhaustive no longer is.
 - `NetworkAudioSessionCipher.seal`, `open`, and `NonceDomain` are no longer public. Sealing
   correctly means naming the right nonce domain, and naming the wrong one silently reuses a nonce
   under the session key, which produces no visible symptom and defeats the encryption entirely.
