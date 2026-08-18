@@ -177,11 +177,27 @@ public enum AudioFileFrameStreamEvent: Equatable, Sendable {
   case failed(AudioFileFrameStreamError)
 }
 
-/// The one way to see why a file is or is not moving.
+/// The one way to see why a file is or is not moving, and only while building for debugging.
 ///
-/// Off unless debug logging is enabled: a producer keeping its queues full says so on every cycle,
-/// and what matters is only whether it stays at one of these for a long time.
-private let producerLog = Logger(subsystem: "moe.uwucocoa.rilliyakit", category: "file-playback")
+/// A producer keeping its queues full says so on every cycle, so what is worth reading is never
+/// one line but whether it stays at the same one. That is a question asked while diagnosing, not
+/// something a shipped build should spend anything on, so outside a debug build this is nothing.
+private enum ProducerDiagnostics {
+  #if DEBUG
+    private static let log = Logger(
+      subsystem: "moe.uwucocoa.rilliyakit",
+      category: "file-playback"
+    )
+  #endif
+
+  /// Reports one change in why the producer is or is not moving.
+  static func report(_ message: @autoclosure () -> String) {
+    #if DEBUG
+      let text = message()
+      log.debug("\(text, privacy: .public)")
+    #endif
+  }
+}
 
 /// What the producer last said about why it is or is not moving, so it says it once per change.
 private enum ProducerReport {
@@ -424,7 +440,7 @@ public final class AudioFileFrameStream: @unchecked Sendable {
       guard let fullest = distributor.maximumAvailableFrameCount else {
         if stallReport != .noDestination {
           stallReport = .noDestination
-          producerLog.debug("no destination is reading this file")
+          ProducerDiagnostics.report("no destination is reading this file")
         }
         try await Task.sleep(for: .milliseconds(2))
         continue
@@ -435,7 +451,7 @@ public final class AudioFileFrameStream: @unchecked Sendable {
           stallReport = .destinationFull
           // The resting state of a throttled producer, not a fault: the file stays a queue ahead
           // of whichever destination is furthest behind, and only moves as that one reads.
-          producerLog.debug(
+          ProducerDiagnostics.report(
             "queues full at \(distributor.capacityFrameCount) frames, waiting for a read")
         }
         try await Task.sleep(for: .milliseconds(2))
@@ -443,7 +459,7 @@ public final class AudioFileFrameStream: @unchecked Sendable {
       }
       if stallReport != .advancing {
         stallReport = .advancing
-        producerLog.debug(
+        ProducerDiagnostics.report(
           "advancing to \(distributor.activeSubscriberCount) destinations")
       }
 

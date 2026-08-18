@@ -616,7 +616,7 @@ final class NetworkAudioPacketIngestor {
       sequence: packet.sequence,
       samples: interleavedStorage,
       frameCount: decodedFrameCount
-    ) { [distributor, configuration] samples, frameCount in
+    ) { samples, frameCount in
       guard frameCount > 0 else { return }
       if let samples {
         self.publish(samples, frameCount: frameCount)
